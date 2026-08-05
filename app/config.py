@@ -15,8 +15,9 @@ class Settings(BaseSettings):
     db_path: str = "data/itx.db"
 
     # 인증 (PLAN 6절)
-    allow_signup: bool = False  # 부트스트랩 1회만 true, 첫 계정 생성 후 false로 되돌린다
-    session_days: int = 30
+    # 가입 허용은 env가 아니라 DB(app_setting.signup_enabled)에 있다 — 관리자가 토글 (D-24)
+    session_days: int = 30  # "로그인 유지" 체크 시 (D-23)
+    session_transient_hours: int = 12  # 미체크 시 — 브라우저 세션 쿠키 + 짧은 서버 만료
     cookie_secure: bool = False  # 배포(ts.net HTTPS)에서는 true
     cookie_name: str = "itx_session"
 

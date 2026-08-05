@@ -65,6 +65,25 @@ def init_db(path: Path | None = None) -> None:
             conn.execute(f"PRAGMA user_version = {version}")
 
 
+# ── 런타임 설정 (app_setting) ────────────────────────────────────────
+# 관리자가 재배포 없이 바꾸는 값만 여기 둔다 (현재: signup_enabled, D-24).
+# env(config.Settings)는 배포 시점에 고정되는 값 담당이다.
+def get_flag(conn: sqlite3.Connection, key: str, default: bool = False) -> bool:
+    row = conn.execute("SELECT value FROM app_setting WHERE key = ?", (key,)).fetchone()
+    return default if row is None else row["value"] == "true"
+
+
+def set_flag(
+    conn: sqlite3.Connection, key: str, value: bool, *, now: datetime, user_id: int | None = None
+) -> None:
+    conn.execute(
+        "INSERT INTO app_setting (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+        " updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+        (key, "true" if value else "false", to_db(now), user_id),
+    )
+
+
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────
 def to_db(value: datetime | _date | None) -> str | None:
     if value is None:

@@ -47,6 +47,7 @@ class User(BaseModel):
     email: str
     display_name: str
     created_at: KstDatetime
+    is_admin: bool = False  # 첫 계정에만 자동 부여. 가입 허용 토글 권한 (D-24)
     # korail_id / korail_pw_enc / discord_webhook_enc 는 DB에만 둔다.
     # API 응답에 절대 노출하지 않는다 (PLAN 6절, CLAUDE.md 절대규칙 9).
 
