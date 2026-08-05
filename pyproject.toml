@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "argon2-cffi>=23.1",     # argon2id 해시 (PLAN 6절). 직접 구현 금지
     "cryptography>=43.0",    # Fernet — 코레일 비밀번호/웹훅 URL 암호화 (Phase 2·3에서 사용)
+    "korail2>=0.4.0",
 ]
 
 # korail2(+ DynaPath 우회 벤더링, D-22)는 Phase 2에서 추가한다.
