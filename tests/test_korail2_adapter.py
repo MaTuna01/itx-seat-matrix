@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from datetime import date as _date
+from datetime import datetime
 
 import pytest
 
@@ -18,10 +19,10 @@ from app.adapters.korail2_adapter import (
     CredentialsRequired,
     Korail2Adapter,
     Korail2DelayAdapter,
-    StopsSourceUnavailable,
+    TrainStopsNotCached,
     TrainObservations,
 )
-from app.domain.models import KorailCred, SeatState
+from app.domain.models import KST, KorailCred, SeatState
 
 RIDE_DATE = _date(2026, 8, 6)
 CRED = KorailCred(korail_id="id", korail_pw="pw")
@@ -151,16 +152,73 @@ async def test_observation_matches_train_no_without_leading_zeros() -> None:
     assert obs.delay("1472", RIDE_DATE) == 15
 
 
-# ── 미확정 경로 ──────────────────────────────────────────────────────────
-async def test_get_stops_is_blocked_pending_source() -> None:
-    """항목 A 확정 전까지는 명확히 막아둔다 — 조용히 빈 값을 주면 안 된다."""
-    with pytest.raises(StopsSourceUnavailable):
+# ── 정차역 캐시 (D-29) ───────────────────────────────────────────────────
+async def test_get_stops_raises_when_not_cached() -> None:
+    """캐시에 없는 열차번호는 명확히 실패한다 — 조용히 빈 값을 주면 안 된다."""
+    from app.storage.db import init_db
+
+    init_db()  # 격리된 테스트 DB_PATH에 스키마를 만든다 (autouse 픽스처가 경로만 바꾼다)
+    with pytest.raises(TrainStopsNotCached):
         await Korail2Adapter().get_stops(CRED, "1472", RIDE_DATE)
 
 
-async def test_list_stations_is_blocked_pending_source() -> None:
-    with pytest.raises(StopsSourceUnavailable):
-        await Korail2Adapter().list_stations()
+async def test_get_stops_reads_from_cache(tmp_path, monkeypatch) -> None:
+    from app.storage import train_stops as stop_repo
+    from app.storage.db import connect, init_db
+
+    db_path = tmp_path / "stops.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    stop_repo.save_stops(
+        conn,
+        "1472",
+        [
+            stop_repo.StopRow(
+                seq=1,
+                station_name="천안",
+                station_code="3900061",
+                stop_type="시발",
+                arrival=None,
+                departure=datetime(2026, 8, 4, 7, 39, tzinfo=KST),
+                run_ymd=_date(2026, 8, 4),
+            ),
+            stop_repo.StopRow(
+                seq=2,
+                station_name="수원",
+                station_code="3900047",
+                stop_type="여객승하차",
+                arrival=datetime(2026, 8, 4, 8, 16, tzinfo=KST),
+                departure=datetime(2026, 8, 4, 8, 19, tzinfo=KST),
+                run_ymd=_date(2026, 8, 4),
+            ),
+        ],
+        now=datetime(2026, 8, 4, 12, 0, tzinfo=KST),
+    )
+    conn.close()
+
+    import app.storage.db as db_mod
+
+    monkeypatch.setattr(db_mod, "db_path", lambda: db_path)
+
+    stops = await Korail2Adapter().get_stops(CRED, "1472", RIDE_DATE)
+    assert [s.name for s in stops] == ["천안", "수원"]
+    assert stops[0].arrival.date() == RIDE_DATE  # 요청 날짜로 재적용됐다
+
+
+async def test_list_stations_returns_usable_from_table(tmp_path, monkeypatch) -> None:
+    from app.storage.stations import Station, upsert
+    from app.storage.db import connect, init_db
+    import app.storage.db as db_mod
+
+    db_path = tmp_path / "stations2.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    upsert(conn, Station(name="수원", code="3900047", usable=True), source="t", now=datetime.now(KST))
+    conn.close()
+    monkeypatch.setattr(db_mod, "db_path", lambda: db_path)
+
+    result = await Korail2Adapter().list_stations()
+    assert [s.name for s in result] == ["수원"]
 
 
 async def test_missing_credentials_raise_clear_error() -> None:

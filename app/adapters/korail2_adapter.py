@@ -42,18 +42,24 @@ from app.domain.models import (
     StopInfo,
     TrainSummary,
 )
+from app.storage import stations as station_repo
+from app.storage import train_stops as stop_repo
+from app.storage.db import get_conn
 
 
 class CredentialsRequired(RuntimeError):
     """코레일 계정이 연결되지 않았다. `PUT /api/me/korail`로 먼저 등록해야 한다."""
 
 
-class StopsSourceUnavailable(RuntimeError):
-    """정차역 소스가 아직 확정되지 않았다 (Phase 2 항목 A).
+class TrainStopsNotCached(RuntimeError):
+    """이 열차의 정차역이 아직 캐시에 없다 (D-29).
 
-    Phase 0 항목 5 = NO — 열차번호로 **전체 정차역**을 주는 코레일 엔드포인트가 없다.
-    `ScheduleView`는 조회한 dep→arr 한 쌍과 운행 순번만 준다.
-    외부 소스(공공데이터포털 열차운행정보)를 붙이기 전까지 이 경로는 열리지 않는다.
+    코레일에는 열차번호로 전체 정차역을 주는 엔드포인트가 없다 (Phase 0 항목 5 = NO).
+    대신 공공데이터 운행정보(최근 운행일 실적)를 `scripts/load_train_stops.py`로
+    캐시해 템플릿으로 재사용한다. 이 예외는 **그 캐시에 없는 열차번호**를 뜻한다 —
+    신규 편성이거나, 정기 시각표 개정으로 번호가 바뀐 경우일 수 있다 (D-29 실측:
+    같은 노선이 8/4엔 1472, 8/6 이후엔 1202~1210대로 관측됨). 조용히 빈 매트릭스를
+    주는 대신 재적재를 안내한다.
     """
 
 
@@ -134,18 +140,35 @@ class Korail2Adapter:
         """
         return self.observations.name(train_no, d)
 
-    # ── 정차역 — 항목 A 확정 전까지 열리지 않는다 ─────────────────────
+    # ── 정차역 (D-29) ────────────────────────────────────────────────
     async def get_stops(self, cred: KorailCred | None, train_no: str, d: _date) -> list[StopInfo]:
-        raise StopsSourceUnavailable(
-            "정차역 소스가 미확정이다 (Phase 2 항목 A). "
-            "열차번호로 전체 정차역을 주는 코레일 엔드포인트는 없다 (Phase 0 항목 5 = NO). "
-            "공공데이터포털 열차운행정보 연동 후 열린다."
-        )
+        """`train_stop` 캐시(최근 운행일 실적)를 요청 날짜에 재적용한다.
+
+        `cred`는 쓰지 않는다 — 소스가 코레일이 아니라 공공데이터이므로 사용자
+        자격증명과 무관하다. 캐시가 없으면 `TrainStopsNotCached`로 명확히 실패한다.
+        """
+        stops = await asyncio.to_thread(self._get_stops_sync, train_no, d)
+        if stops is None:
+            raise TrainStopsNotCached(
+                f"열차 {train_no}의 정차역이 캐시에 없다. "
+                "scripts/load_train_stops.py 로 최근 운행일 실적을 적재하라 "
+                "(정기 시각표 개정으로 번호가 바뀌었을 수도 있다)."
+            )
+        return stops
+
+    @staticmethod
+    def _get_stops_sync(train_no: str, d: _date) -> list[StopInfo] | None:
+        with get_conn() as conn:
+            return stop_repo.get_stops(conn, train_no, d)
 
     async def list_stations(self) -> list[StationInfo]:
-        raise StopsSourceUnavailable(
-            "역 목록 소스가 미확정이다 (Phase 2 항목 A/G). station 테이블 적재 후 열린다."
-        )
+        """`station` 테이블에서 여객역만(`usable=1`). `cred` 불필요 — 공공데이터 소스."""
+        return await asyncio.to_thread(self._list_stations_sync)
+
+    @staticmethod
+    def _list_stations_sync() -> list[StationInfo]:
+        with get_conn() as conn:
+            return station_repo.list_usable(conn)
 
     # ── ★ 좌석맵 ─────────────────────────────────────────────────────
     async def get_seat_map(
@@ -247,7 +270,7 @@ __all__ = [
     "CredentialsRequired",
     "Korail2Adapter",
     "Korail2DelayAdapter",
-    "StopsSourceUnavailable",
+    "TrainStopsNotCached",
     "get_korail2_adapter",
     "get_korail2_delay_adapter",
     "same_train_no",
