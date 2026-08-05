@@ -3,9 +3,9 @@
 `GET /api/trains/{train_no}/matrix`가 **프론트의 유일한 핵심 호출**이다.
 응답 스키마는 PLAN 7절 예시와 1:1 (프로토타입 `seat-matrix.jsx`가 그대로 렌더한다).
 
-Phase 1 범위 밖:
-- `lat/lng` GPS 보정 → Phase 2 (station 좌표 + `domain/geo.py` 선분 투영, D-13)
-- 60초 TTL 캐시 → Phase 2 (화면 트래픽 전용, D-17)
+`lat/lng`(+ `gps_accuracy_m`/`gps_fixed_at_ms`)는 선택 파라미터다. 있으면
+`domain/geo.py`의 선분 투영으로 `current_seg_idx`를 GPS 실측으로 보정한다 (D-13).
+위치 권한을 거부해도(파라미터 없음) 전 기능이 정상 동작한다.
 """
 
 from __future__ import annotations
@@ -22,10 +22,12 @@ from app.adapters.delay_zero import ZeroDelayAdapter
 from app.adapters.korail_port import KorailPort
 from app.adapters.seatmap_fetcher import SCREEN_RETRY, fetch_matrix
 from app.auth.session import current_user
+from app.domain.geo import GeoFix, is_fix_usable, project_onto_route
 from app.domain.matrix import query_range
 from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
 from app.domain.timeline import estimate_seg, next_poll_hint
 from app.domain.verdict import build_verdict
+from app.storage import stations as station_repo
 from app.storage.db import db_session
 from app.storage.matrix_cache import SqliteSeatMapCache
 
@@ -102,6 +104,12 @@ async def get_matrix(
     board_at: str,
     alight_at: str,
     my_seat: str | None = None,
+    lat: float | None = Query(default=None, description="GPS 위도 (선택, D-13)"),
+    lng: float | None = Query(default=None, description="GPS 경도 (선택, D-13)"),
+    gps_accuracy_m: float | None = Query(default=None, description="GPS 정확도 반경(m)"),
+    gps_fixed_at_ms: float | None = Query(
+        default=None, description="GPS 측정 시각 (epoch ms — Geolocation.timestamp 그대로)"
+    ),
     user: User = Depends(current_user),
     port: KorailPort = Depends(get_korail_port),
     delay_port: ZeroDelayAdapter = Depends(get_delay_port),
@@ -128,6 +136,23 @@ async def get_matrix(
     train_name = await port.get_train_name(train_no, date)
     delay_minutes = await delay_port.get_delay_minutes(train_no, date)
     current_seg_idx = estimate_seg(stops, delay_minutes or 0, now)
+    position_source = "schedule"
+
+    # GPS 포그라운드 보정 (D-13). 넷 다 있어야 시도한다 — 일부만 오면 신선도를
+    # 판단할 수 없으므로 시각표 추정을 그대로 둔다(안전한 방향, D-21).
+    if None not in (lat, lng, gps_accuracy_m, gps_fixed_at_ms):
+        fix = GeoFix(
+            lat=lat,
+            lng=lng,
+            accuracy_m=gps_accuracy_m,
+            fixed_at=datetime.fromtimestamp(gps_fixed_at_ms / 1000, tz=KST),
+        )
+        if is_fix_usable(fix, now=now):
+            coords = station_repo.coords_for(conn, names)
+            gps_idx = project_onto_route(names, coords, lat, lng)
+            if gps_idx is not None:
+                current_seg_idx = gps_idx
+                position_source = "gps"
 
     # 조회 범위 = 실효 시작 ~ 하차역 (D-17/D-18). 지나온 구간은 호출하지 않는다
     start_idx, end_idx = query_range(current_seg_idx, board_idx, alight_idx)
@@ -165,7 +190,7 @@ async def get_matrix(
         date=date,
         stops=names,
         current_seg_idx=current_seg_idx,
-        position_source="schedule",  # GPS 보정은 Phase 2 (D-13)
+        position_source=position_source,
         delay_minutes=delay_minutes,
         board_at=board_at,
         alight_at=alight_at,
