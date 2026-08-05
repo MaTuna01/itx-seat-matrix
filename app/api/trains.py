@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
 from app.adapters.delay_zero import ZeroDelayAdapter
 from app.adapters.korail_port import KorailPort
-from app.adapters.seatmap_fetcher import fetch_matrix
+from app.adapters.seatmap_fetcher import SCREEN_RETRY, fetch_matrix
 from app.auth.session import current_user
 from app.domain.matrix import query_range
 from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
@@ -132,7 +132,8 @@ async def get_matrix(
     # 조회 범위 = 실효 시작 ~ 하차역 (D-17/D-18). 지나온 구간은 호출하지 않는다
     start_idx, end_idx = query_range(current_seg_idx, board_idx, alight_idx)
     # 60초 TTL 캐시는 **화면 전용**이다 — 새로고침 연타를 흡수한다.
-    # 스케줄러는 이 경로를 쓰지 않고 cache=None으로 항상 실조회한다 (D-17).
+    # 스케줄러는 이 경로를 쓰지 않고 cache=None + SCHEDULER_RETRY로 항상 실조회한다 (D-17).
+    # 재시도도 화면용으로 짧게 간다 — 30초×3이면 최악 60초간 응답이 멈춘다 (D-27).
     matrix = await fetch_matrix(
         port,
         cred,
@@ -143,6 +144,7 @@ async def get_matrix(
         end_idx,
         now=now,
         cache=SqliteSeatMapCache(conn),
+        retry=SCREEN_RETRY,
     )
 
     sub_status = SubscriptionStatus.SEATED if my_car is not None else SubscriptionStatus.STANDING

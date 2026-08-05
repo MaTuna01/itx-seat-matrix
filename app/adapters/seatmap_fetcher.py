@@ -33,14 +33,21 @@ class RetryPolicy:
     """조정 예정 손잡이 — 매직 넘버를 로직에 인라인하지 않는다 (D-17).
 
     `attempts`는 **총 시도 횟수**다 (최초 1회 + 재시도 2회가 아니라 3회 시도).
-    CLAUDE.md 10의 "재시도(30초×3)가 상한"을 그대로 옮긴 값이다.
     """
 
     attempts: int = 3
     delay_seconds: float = 30.0
 
 
-DEFAULT_RETRY = RetryPolicy()
+# 스케줄러용 — CLAUDE.md 10의 "재시도(30초×3)가 상한"을 그대로 옮긴 값.
+# 8절의 FETCH_FAILED("한 조회 시점 내 3회 실패")가 세는 대상이 이것이다.
+SCHEDULER_RETRY = RetryPolicy(attempts=3, delay_seconds=30.0)
+
+# 화면용 — 30초×3은 최악 60초 대기라 사용자를 화면 앞에 세워둔다 (D-27).
+# 화면은 실패하면 빨리 실패하는 편이 낫다. 새로고침이 곧 재시도다.
+SCREEN_RETRY = RetryPolicy(attempts=2, delay_seconds=2.0)
+
+DEFAULT_RETRY = SCHEDULER_RETRY
 NO_RETRY = RetryPolicy(attempts=1, delay_seconds=0.0)
 
 

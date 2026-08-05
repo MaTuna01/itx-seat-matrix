@@ -43,8 +43,12 @@ def get_korail_cred(
     return load_korail_cred(conn, user.id)
 
 
-def get_delay_port() -> ZeroDelayAdapter:
-    """Phase 2에서 실구현으로 교체 (D-12). 그때까지는 항상 지연 0."""
+def get_delay_port():  # noqa: ANN201 — DelayPort 구현체 (mock/korail2 분기)
+    """지연 정보 (D-12). mock 경로는 항상 지연 0을 유지한다."""
+    if get_settings().adapter == "korail2":
+        from app.adapters.korail2_adapter import get_korail2_delay_adapter  # noqa: PLC0415
+
+        return get_korail2_delay_adapter()
     return _zero_delay
 
 
