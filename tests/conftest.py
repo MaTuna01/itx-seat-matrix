@@ -58,9 +58,11 @@ def make_matrix(
 
 @pytest.fixture(autouse=True)
 def _isolated_settings(tmp_path, monkeypatch):
-    """테스트마다 독립 DB + 가입 허용. `.env`의 실제 값이 새어들지 않게 한다."""
+    """테스트마다 독립 DB. `.env`의 실제 값이 새어들지 않게 한다.
+
+    첫 계정은 부트스트랩으로 항상 가입 가능하다 (D-24) — 별도 플래그가 필요 없다.
+    """
     monkeypatch.setenv("DB_PATH", str(tmp_path / "test.db"))
-    monkeypatch.setenv("ALLOW_SIGNUP", "true")
     monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("ADAPTER", "mock")
     get_settings.cache_clear()
@@ -82,6 +84,12 @@ def client():
         )
         assert res.status_code == 201, res.text
         yield c
+
+
+def enable_signup(admin_client) -> None:
+    """관리자가 가입을 연다 (D-24). 두 번째 계정을 만들려면 반드시 거쳐야 한다."""
+    res = admin_client.patch("/api/admin/settings", json={"signup_enabled": True})
+    assert res.status_code == 200, res.text
 
 
 @pytest.fixture

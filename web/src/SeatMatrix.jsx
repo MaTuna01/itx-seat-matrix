@@ -24,7 +24,7 @@ function clearUntil(seat, startIdx, alightIdx) {
   return until;
 }
 
-export default function SeatMatrix({ subscription, onSubscriptionChange, onReset }) {
+export default function SeatMatrix({ subscription, onSubscriptionChange, onReset, onOpenSettings }) {
   const [data, setData] = useState(null);
   const [stale, setStale] = useState(false);
   const [error, setError] = useState(null);
@@ -127,6 +127,9 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           <span style={st.dim}>{data.board_at} → {data.alight_at} · 자유석</span>
           <button style={{ ...st.ghostBtn, marginLeft: "auto", padding: "4px 8px" }} onClick={onReset}>
             탑승 종료
+          </button>
+          <button style={{ ...st.ghostBtn, padding: "4px 8px" }} onClick={onOpenSettings}>
+            설정
           </button>
         </div>
         <div style={st.statusRow}>

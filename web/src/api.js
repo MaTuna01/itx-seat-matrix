@@ -26,11 +26,20 @@ async function request(path, { method = "GET", body } = {}) {
 
 export const api = {
   me: () => request("/api/me"),
-  login: (email, password) =>
-    request("/api/auth/login", { method: "POST", body: { email, password } }),
-  signup: (email, password, display_name) =>
-    request("/api/auth/signup", { method: "POST", body: { email, password, display_name } }),
+  // remember=true면 지속 쿠키 30일, 아니면 브라우저 세션 쿠키 + 12시간 (D-23)
+  login: (email, password, remember) =>
+    request("/api/auth/login", { method: "POST", body: { email, password, remember } }),
+  signup: (email, password, display_name, remember) =>
+    request("/api/auth/signup", {
+      method: "POST",
+      body: { email, password, display_name, remember },
+    }),
   logout: () => request("/api/auth/logout", { method: "POST" }),
+
+  // 관리자 전용 (D-24). 비관리자는 403
+  adminSettings: () => request("/api/admin/settings"),
+  setSignupEnabled: (signup_enabled) =>
+    request("/api/admin/settings", { method: "PATCH", body: { signup_enabled } }),
 
   subscriptions: () => request("/api/subscriptions"),
   createSubscription: (payload) =>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, UnauthorizedError } from "./api";
 import Login from "./Login";
 import SeatMatrix from "./SeatMatrix";
+import Settings from "./Settings";
 import Setup from "./Setup";
 import { st } from "./styles";
 
@@ -34,6 +35,8 @@ export default function App() {
     }
   };
 
+  const openSettings = () => setState({ ...state, phase: "settings", from: state.phase });
+
   if (state.phase === "loading") {
     return <div style={{ ...st.page, paddingTop: 48 }}><p style={st.dim}>불러오는 중…</p></div>;
   }
@@ -51,12 +54,21 @@ export default function App() {
 
   if (state.phase === "login") return <Login onLoggedIn={bootstrap} />;
 
+  if (state.phase === "settings") {
+    return (
+      <Settings
+        user={state.user}
+        onBack={() => setState({ ...state, phase: state.from ?? "setup" })}
+        onLoggedOut={() => setState({ phase: "login" })}
+      />
+    );
+  }
+
   if (state.phase === "setup") {
     return (
       <Setup
-        onCreated={(subscription) =>
-          setState({ ...state, phase: "matrix", subscription })
-        }
+        onCreated={(subscription) => setState({ ...state, phase: "matrix", subscription })}
+        onOpenSettings={openSettings}
       />
     );
   }
@@ -65,6 +77,7 @@ export default function App() {
     <SeatMatrix
       subscription={state.subscription}
       onSubscriptionChange={(subscription) => setState({ ...state, subscription })}
+      onOpenSettings={openSettings}
       onReset={guard(async () => {
         await api.deleteSubscription(state.subscription.id);
         setState({ ...state, phase: "setup", subscription: null });

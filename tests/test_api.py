@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-import pytest
+from fastapi.testclient import TestClient
 
-from app.config import get_settings
-from app.storage.db import connect, db_path
+from app.main import app
+from app.storage.db import connect, db_path, dt_from_db
+from tests.conftest import enable_signup
 
 # 목업 열차는 운행일 08:00~08:56에 달린다. 내일 날짜를 쓰면 "운행 전"이 확정돼
 # 현재 구간이 시계와 무관하게 0이 된다 (테스트 결정성)
@@ -57,14 +58,117 @@ class TestAuth:
         assert client.post("/api/auth/logout").status_code == 204
         assert client.get("/api/me").status_code == 401
 
-    def test_가입이_잠겨있으면_403(self, anon_client, monkeypatch):
-        monkeypatch.setenv("ALLOW_SIGNUP", "false")
-        get_settings.cache_clear()
+
+class TestRememberMe:
+    """세션 수명 이원화 (D-23). 쿠키와 서버 세션을 함께 가른다."""
+
+    def _cookie_header(self, res):
+        return res.headers["set-cookie"]
+
+    def test_미체크면_브라우저_세션_쿠키다(self, anon_client):
         res = anon_client.post(
             "/api/auth/signup",
-            json={"email": "x@example.com", "password": "12345678", "display_name": "x"},
+            json={"email": "a@example.com", "password": "commute-1234", "display_name": "나"},
+        )
+        assert res.status_code == 201
+        # Max-Age/Expires가 없어야 브라우저 종료 시 사라진다
+        header = self._cookie_header(res).lower()
+        assert "max-age" not in header and "expires" not in header
+
+    def test_체크하면_지속_쿠키_30일(self, anon_client):
+        anon_client.post(
+            "/api/auth/signup",
+            json={"email": "a@example.com", "password": "commute-1234", "display_name": "나"},
+        )
+        anon_client.post("/api/auth/logout")
+        res = anon_client.post(
+            "/api/auth/login",
+            json={"email": "a@example.com", "password": "commute-1234", "remember": True},
+        )
+        assert res.status_code == 200
+        assert f"Max-Age={30 * 24 * 3600}" in self._cookie_header(res)
+
+    def test_서버_세션_만료도_함께_갈린다(self, anon_client):
+        """쿠키만 바꾸면 서버 세션이 30일 살아 있어 반쪽짜리다."""
+        anon_client.post(
+            "/api/auth/signup",
+            json={"email": "a@example.com", "password": "commute-1234", "display_name": "나"},
+        )
+        with connect(db_path()) as conn:
+            transient = conn.execute(
+                "SELECT persistent, created_at, expires_at FROM session"
+            ).fetchone()
+        assert transient["persistent"] == 0
+        assert dt_from_db(transient["expires_at"]) - dt_from_db(transient["created_at"]) == timedelta(
+            hours=12
+        )
+
+        anon_client.post("/api/auth/logout")
+        anon_client.post(
+            "/api/auth/login",
+            json={"email": "a@example.com", "password": "commute-1234", "remember": True},
+        )
+        with connect(db_path()) as conn:
+            row = conn.execute("SELECT persistent, created_at, expires_at FROM session").fetchone()
+        assert row["persistent"] == 1
+        assert dt_from_db(row["expires_at"]) - dt_from_db(row["created_at"]) == timedelta(days=30)
+
+    def test_슬라이딩_연장은_원래_수명으로만_한다(self, anon_client):
+        """임시 세션이 접속할 때마다 30일로 승격되면 규칙이 무의미해진다."""
+        anon_client.post(
+            "/api/auth/signup",
+            json={"email": "a@example.com", "password": "commute-1234", "display_name": "나"},
+        )
+        anon_client.get("/api/me")  # 슬라이딩 연장 발생
+        with connect(db_path()) as conn:
+            row = conn.execute("SELECT created_at, expires_at FROM session").fetchone()
+        gap = dt_from_db(row["expires_at"]) - dt_from_db(row["created_at"])
+        assert gap < timedelta(days=1)
+
+
+class TestSignupLock:
+    """가입 잠금은 DB에 있고 관리자가 토글한다 (D-24)."""
+
+    def test_첫_계정은_부트스트랩으로_열리고_관리자가_된다(self, client):
+        assert client.get("/api/me").json()["is_admin"] is True
+        assert client.get("/api/admin/settings").json() == {"signup_enabled": False}
+
+    def test_두_번째_가입은_기본_잠김이다(self, client, anon_client):
+        res = anon_client.post(
+            "/api/auth/signup",
+            json={"email": "x@example.com", "password": "commute-1234", "display_name": "x"},
         )
         assert res.status_code == 403
+
+    def test_관리자가_켜면_가입되고_다시_끌_수_있다(self, client, anon_client):
+        enable_signup(client)
+        res = anon_client.post(
+            "/api/auth/signup",
+            json={"email": "x@example.com", "password": "commute-1234", "display_name": "x"},
+        )
+        assert res.status_code == 201
+        assert res.json()["is_admin"] is False  # 관리자는 첫 계정뿐
+
+        client.patch("/api/admin/settings", json={"signup_enabled": False})
+        with TestClient(app) as third:
+            assert third.post(
+                "/api/auth/signup",
+                json={"email": "y@example.com", "password": "commute-1234", "display_name": "y"},
+            ).status_code == 403
+
+    def test_비관리자는_토글할_수_없다(self, client, anon_client):
+        enable_signup(client)
+        anon_client.post(
+            "/api/auth/signup",
+            json={"email": "x@example.com", "password": "commute-1234", "display_name": "x"},
+        )
+        assert anon_client.get("/api/admin/settings").status_code == 403
+        assert anon_client.patch(
+            "/api/admin/settings", json={"signup_enabled": True}
+        ).status_code == 403
+
+    def test_인증_없이는_401(self, anon_client):
+        assert anon_client.get("/api/admin/settings").status_code == 401
 
 
 class TestSubscriptionTransition:
@@ -123,6 +227,7 @@ class TestSubscriptionTransition:
 
     def test_남의_구독은_보이지_않는다(self, client, anon_client):
         sub = make_subscription(client)
+        enable_signup(client)
         anon_client.post(
             "/api/auth/signup",
             json={"email": "other@example.com", "password": "commute-1234", "display_name": "남"},
@@ -214,6 +319,7 @@ def test_프리셋은_사용자별로_보인다(client, anon_client):
     assert res.json()["poll_offsets_min"] == [10, 4]
     assert len(client.get("/api/presets").json()) == 1
 
+    enable_signup(client)
     anon_client.post(
         "/api/auth/signup",
         json={"email": "other@example.com", "password": "commute-1234", "display_name": "남"},

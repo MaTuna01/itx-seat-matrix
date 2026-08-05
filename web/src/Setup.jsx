@@ -6,7 +6,7 @@ import { st } from "./styles";
 // Phase 1은 목업 어댑터라 열차/역이 고정이지만, 값은 하드코딩하지 않고 입력으로 받는다 (원칙 1).
 const today = () => new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Seoul" });
 
-export default function Setup({ onCreated }) {
+export default function Setup({ onCreated, onOpenSettings }) {
   const [form, setForm] = useState({
     train_no: "1004",
     date: today(),
@@ -41,7 +41,10 @@ export default function Setup({ onCreated }) {
   return (
     <div style={{ ...st.page, paddingTop: 32 }}>
       <div style={st.card}>
-        <h1 style={st.h1}>탑승 등록</h1>
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <h1 style={{ ...st.h1, flex: 1 }}>탑승 등록</h1>
+          <button type="button" style={st.ghostBtn} onClick={onOpenSettings}>설정</button>
+        </div>
         <p style={st.dim}>등록하면 정차역 도착 전에 자동으로 좌석을 다시 조회합니다.</p>
 
         <form onSubmit={submit}>
