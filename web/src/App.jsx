@@ -71,6 +71,8 @@ export default function App() {
         user={state.user}
         onBack={() => setState({ ...state, phase: state.from ?? "setup" })}
         onLoggedOut={() => setState({ phase: "login" })}
+        // 코레일 연결/해제는 MeOut을 돌려준다 — korail_linked 표시를 즉시 갱신한다
+        onUserChange={(user) => setState((s) => ({ ...s, user }))}
       />
     );
   }

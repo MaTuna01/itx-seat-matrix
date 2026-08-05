@@ -36,6 +36,13 @@ export const api = {
     }),
   logout: () => request("/api/auth/logout", { method: "POST" }),
 
+  // 코레일 계정 연결 (D-22). 응답은 MeOut — 자격증명은 절대 되돌아오지 않는다.
+  // 저장 시점에 실제 로그인 검증은 하지 않는다(호출 예절) — 틀린 자격증명은
+  // 첫 매트릭스 조회에서 드러난다.
+  linkKorail: (korail_id, korail_pw) =>
+    request("/api/me/korail", { method: "PUT", body: { korail_id, korail_pw } }),
+  unlinkKorail: () => request("/api/me/korail", { method: "DELETE" }),
+
   // 관리자 전용 (D-24). 비관리자는 403
   adminSettings: () => request("/api/admin/settings"),
   setSignupEnabled: (signup_enabled) =>
