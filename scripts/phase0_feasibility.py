@@ -915,11 +915,25 @@ def step4() -> None:
                 walk(v, f"{path}[{i}]")
 
     files = sorted(RESULTS_DIR.glob("*.json"))
+    has_train_payload = False
     for f in files:
         try:
-            walk(json.loads(f.read_text(encoding="utf-8")), f.name)
+            doc = json.loads(f.read_text(encoding="utf-8"))
         except ValueError:
             continue
+        if '"trn_info"' in json.dumps(doc, ensure_ascii=False):
+            has_train_payload = True
+        walk(doc, f.name)
+
+    if not has_train_payload:
+        say(
+            f"검사한 파일 {len(files)}개 — 그중 열차 응답(trn_info)을 담은 파일이 0개다.\n"
+            "\n⚠️ 항목 4 = 미판정 — 지연 필드가 없는 게 아니라, 성공한 조회 응답 자체가 없다.\n"
+            "   (소스 레벨로는 ScheduleView 응답의 h_expct_dlay_hr 를 두 라이브러리가 모두 읽는다.\n"
+            "    실측은 조회가 가능해진 뒤에만 가능하다.)"
+        )
+        save_result("4", "delay_fields", {"verdict": "INCONCLUSIVE", "reason": "no successful train response captured"})
+        return
 
     uniq: dict[str, set[str]] = {}
     for h in hits:
