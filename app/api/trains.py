@@ -10,6 +10,7 @@ Phase 1 범위 밖:
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import date as _date
 from datetime import datetime, time as _time
 
@@ -25,6 +26,8 @@ from app.domain.matrix import query_range
 from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
 from app.domain.timeline import estimate_seg, next_poll_hint
 from app.domain.verdict import build_verdict
+from app.storage.db import db_session
+from app.storage.matrix_cache import SqliteSeatMapCache
 
 router = APIRouter(prefix="/api/trains", tags=["trains"])
 
@@ -103,6 +106,7 @@ async def get_matrix(
     port: KorailPort = Depends(get_korail_port),
     delay_port: ZeroDelayAdapter = Depends(get_delay_port),
     cred: KorailCred | None = Depends(get_korail_cred),
+    conn: sqlite3.Connection = Depends(db_session),
 ) -> MatrixOut:
     now = now_kst()
     my_car, my_seat_no = parse_my_seat(my_seat)
@@ -127,8 +131,18 @@ async def get_matrix(
 
     # 조회 범위 = 실효 시작 ~ 하차역 (D-17/D-18). 지나온 구간은 호출하지 않는다
     start_idx, end_idx = query_range(current_seg_idx, board_idx, alight_idx)
+    # 60초 TTL 캐시는 **화면 전용**이다 — 새로고침 연타를 흡수한다.
+    # 스케줄러는 이 경로를 쓰지 않고 cache=None으로 항상 실조회한다 (D-17).
     matrix = await fetch_matrix(
-        port, cred, train_no, date, names, start_idx, end_idx, now=now
+        port,
+        cred,
+        train_no,
+        date,
+        names,
+        start_idx,
+        end_idx,
+        now=now,
+        cache=SqliteSeatMapCache(conn),
     )
 
     sub_status = SubscriptionStatus.SEATED if my_car is not None else SubscriptionStatus.STANDING
