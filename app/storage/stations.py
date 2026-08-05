@@ -62,12 +62,14 @@ def upsert(conn: sqlite3.Connection, station: Station, *, source: str, now: date
     적재해도 합쳐지도록 `COALESCE(새 값, 기존 값)`으로 병합한다. 이게 없으면
     나중에 적재한 파일이 앞선 파일의 컬럼을 지워버린다.
 
-    `usable`도 같은 이유로 **끄는 방향으로는 덮지 않는다**(`MAX`). 좌표를 얻으면
-    여객역으로 확정되는데, 나중에 코드 사전을 다시 적재해 0으로 되돌리면
-    드롭다운이 조용히 비어버린다.
+    `usable`도 같은 이유로 **끄는 방향으로는 덮지 않는다**(`MAX`). 한 번 여객역으로
+    확정된 역을 나중에 다른 파일 적재로 0으로 되돌리면 드롭다운이 조용히 비어버린다.
+
+    `usable`은 **좌표 유무로 추론하지 않는다.** 적재하는 쪽이 명시해야 한다 (D-28 개정) —
+    '전국 도시철도역사정보'처럼 좌표가 있어도 ITX가 서지 않는 역이 1,100개나 되는
+    파일이 있어서, 좌표를 근거로 삼으면 드롭다운이 지하철역으로 범람한다.
     """
-    # 좌표가 있으면 그 자체가 여객역 근거다 (15127532는 정의상 간선 여객역이다)
-    usable = 1 if (station.usable or station.has_coords) else 0
+    usable = 1 if station.usable else 0
     conn.execute(
         "INSERT INTO station (name, code, lat, lng, line, usable, source, updated_at)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -90,6 +92,32 @@ def upsert(conn: sqlite3.Connection, station: Station, *, source: str, now: date
             to_db(now),
         ),
     )
+
+
+def fill_coords_only(
+    conn: sqlite3.Connection, station: Station, *, source: str, now: datetime
+) -> bool:
+    """**이미 있는 역의 좌표만** 채운다. 없는 역은 만들지 않는다.
+
+    '전국 도시철도역사정보'(1,100행)처럼 우리 유니버스보다 넓은 좌표 소스를 쓸 때
+    필요하다. 그 파일에는 `강남`·`신사`처럼 ITX가 서지 않는 지하철역이 대부분인데,
+    새로 넣으면 역 테이블이 지하철로 뒤덮인다. **코레일 역코드 사전에 있는 역**
+    (= 코레일이 운영하는 지점)에만 좌표를 얹는 것이 이 함수의 목적이다.
+
+    반환값은 실제로 갱신했는지 여부.
+    """
+    if not station.has_coords:
+        return False
+    cur = conn.execute(
+        "UPDATE station SET"
+        "   lat = COALESCE(lat, ?),"
+        "   lng = COALESCE(lng, ?),"
+        "   line = COALESCE(line, ?),"
+        "   updated_at = ?"
+        " WHERE name = ? AND (lat IS NULL OR lng IS NULL)",
+        (station.lat, station.lng, station.line, to_db(now), station.name),
+    )
+    return cur.rowcount > 0
 
 
 def mark_usable(

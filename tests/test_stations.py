@@ -152,9 +152,27 @@ def test_code_dictionary_rows_are_not_usable(conn: sqlite3.Connection) -> None:
     assert list_usable(conn) == []
 
 
-def test_coords_imply_usable(conn: sqlite3.Connection) -> None:
-    """좌표 CSV(15127532)는 정의상 간선 여객역이므로 좌표가 근거가 된다."""
-    upsert(conn, Station(name="수원", lat=37.2656, lng=127.0002), source="좌표.csv", now=NOW)
+def test_coords_alone_do_not_imply_usable(conn: sqlite3.Connection) -> None:
+    """★ 좌표가 있다고 여객역은 아니다 (D-28 개정).
+
+    '전국 도시철도역사정보'는 좌표를 913개 주지만 그중 `강남`·`가락시장`·
+    부산 지하철처럼 ITX가 서지 않는 역이 대부분이다. 좌표를 근거로 삼으면
+    드롭다운이 지하철역으로 범람한다. 적재하는 쪽이 명시해야 한다.
+    """
+    upsert(conn, Station(name="강남", lat=37.4973, lng=127.0278), source="도시철도.xlsx", now=NOW)
+    assert count_with_coords(conn) == 1
+    assert count_usable(conn) == 0
+    assert list_usable(conn) == []
+
+
+def test_passenger_flag_marks_usable(conn: sqlite3.Connection) -> None:
+    """여객역 목록임이 확실한 파일만 usable=True로 적재한다 (--passenger)."""
+    upsert(
+        conn,
+        Station(name="수원", lat=37.2656, lng=127.0002, usable=True),
+        source="역위치정보.csv",
+        now=NOW,
+    )
     assert count_usable(conn) == 1
     assert [s.name for s in list_usable(conn)] == ["수원"]
 
@@ -174,7 +192,7 @@ def test_usable_is_never_turned_off_by_relaod(conn: sqlite3.Connection) -> None:
 
     되돌아가면 드롭다운이 조용히 비어버린다 — 에러 없이 기능이 사라지는 종류의 사고다.
     """
-    upsert(conn, Station(name="수원", lat=37.2, lng=127.0), source="좌표.csv", now=NOW)
+    upsert(conn, Station(name="수원", lat=37.2, lng=127.0, usable=True), source="좌표.csv", now=NOW)
     upsert(conn, Station(name="수원", code="3900047"), source="역코드.csv", now=NOW)
     assert count_usable(conn) == 1
 
@@ -333,3 +351,65 @@ def test_timetable_code_overrides_csv_ambiguity(conn: sqlite3.Connection) -> Non
     assert got is not None
     assert got.code == "3900895"
     assert got.usable
+
+
+# ── --coords-only: 넓은 좌표 소스로 기존 역만 보강 ───────────────────────
+def test_fill_coords_only_updates_existing(conn: sqlite3.Connection) -> None:
+    from app.storage.stations import fill_coords_only
+
+    upsert(conn, Station(name="안양", code="3900039"), source="역코드.csv", now=NOW)
+    assert fill_coords_only(
+        conn, Station(name="안양", lat=37.401929, lng=126.92, line="경부선"), source="x", now=NOW
+    )
+    got = get(conn, "안양")
+    assert got is not None and got.has_coords and got.code == "3900039"
+    assert got.line == "경부선"
+
+
+def test_fill_coords_only_never_inserts(conn: sqlite3.Connection) -> None:
+    """★ 전국 지하철 913개가 역 테이블로 쏟아지면 안 된다."""
+    from app.storage.stations import fill_coords_only
+
+    assert not fill_coords_only(
+        conn, Station(name="강남", lat=37.4973, lng=127.0278), source="도시철도.xlsx", now=NOW
+    )
+    assert count(conn) == 0
+
+
+def test_fill_coords_only_does_not_change_usable(conn: sqlite3.Connection) -> None:
+    from app.storage.stations import fill_coords_only
+
+    upsert(conn, Station(name="오산", code="3900052"), source="역코드.csv", now=NOW)
+    fill_coords_only(conn, Station(name="오산", lat=37.145, lng=127.06), source="x", now=NOW)
+    got = get(conn, "오산")
+    assert got is not None and got.has_coords and not got.usable  # 좌표는 붙고 usable은 그대로
+
+
+def test_fill_coords_only_does_not_overwrite_better_coords(conn: sqlite3.Connection) -> None:
+    """간선 좌표(15127532)가 이미 있으면 도시철도 좌표로 덮지 않는다."""
+    from app.storage.stations import fill_coords_only
+
+    upsert(conn, Station(name="수원", lat=37.26608, lng=126.999231), source="간선", now=NOW)
+    fill_coords_only(conn, Station(name="수원", lat=1.0, lng=2.0), source="도시철도", now=NOW)
+    got = get(conn, "수원")
+    assert got is not None and got.lat == 37.26608
+
+
+def test_xlsx_header_mapping_excludes_subway_station_number() -> None:
+    """★ 도시철도 `역번호`는 `D004` 형식으로 코레일 역코드와 다른 체계다.
+
+    code 로 매핑하면 두 체계가 섞이고 code_for()가 지하철 코드를 돌려준다.
+    """
+    mod = _loader()
+    headers = [
+        "역번호", "역사명", "노선번호", "노선명", "영문역사명", "한자역사명",
+        "환승역구분", "환승노선번호", "환승노선명", "역위도", "역경도",
+        "운영기관명", "역사도로명주소", "역사전화번호", "데이터기준일자",
+    ]
+    mapping, unknown = mod.map_headers(headers)
+    assert mapping["name"] == "역사명"
+    assert mapping["lat"] == "역위도"
+    assert mapping["lng"] == "역경도"
+    assert mapping["line"] == "노선명"
+    assert "code" not in mapping        # ← 핵심
+    assert "역번호" in unknown

@@ -52,6 +52,7 @@ from app.storage.stations import (  # noqa: E402
     count,
     count_usable,
     count_with_coords,
+    fill_coords_only,
     normalize_name,
     upsert,
 )
@@ -59,12 +60,28 @@ from app.storage.stations import (  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DIR = ROOT / "data" / "reference"
 
+USAGE_EPILOG = """\
+적재 순서 예 (파일 성격에 따라 플래그가 다르다):
+
+  # 1) 역코드 사전 — 1,255행에 본청·열차소 같은 운영 지점이 섞여 있어 usable=0
+  uv run python scripts/load_stations.py data/reference/한국철도공사_철도운영정보_역코드_*.csv
+
+  # 2) 간선 여객역 + 좌표 — 여객역 목록임이 확실하므로 --passenger
+  uv run python scripts/load_stations.py --passenger "data/reference/한국철도공사_역 위치 정보_*.csv"
+
+  # 3) 도시철도 좌표 보강 — 1,100행 전국 지하철이라 새 역을 만들면 안 된다
+  uv run python scripts/load_stations.py --coords-only data/reference/전체_도시철도역사정보_*.xlsx
+"""
+
 # 헤더 별칭 → 논리 필드. 비교는 공백·특수문자를 뺀 소문자로 한다.
 ALIASES: dict[str, tuple[str, ...]] = {
-    "name": ("역명", "역이름", "station", "stationname", "stnnm", "역", "정차역명"),
-    "code": ("역코드", "stationcode", "stncd", "코드", "역번호", "stationid"),
-    "lat": ("위도", "latitude", "lat", "y좌표", "ycoord"),
-    "lng": ("경도", "longitude", "lng", "lon", "x좌표", "xcoord"),
+    "name": ("역명", "역사명", "역이름", "station", "stationname", "stnnm", "역", "정차역명"),
+    # ★ `역번호`는 넣지 않는다. '전국 도시철도역사정보'의 역번호는 `D004` 형식으로
+    # 코레일 역코드(`3900023`)와 **다른 체계**다. 여기에 매핑하면 code 컬럼에
+    # 두 체계가 섞이고, code_for()가 지하철 코드를 돌려준다.
+    "code": ("역코드", "stationcode", "stncd", "stationid"),
+    "lat": ("위도", "역위도", "latitude", "lat", "y좌표", "ycoord"),
+    "lng": ("경도", "역경도", "longitude", "lng", "lon", "x좌표", "xcoord"),
     # `지역본부`(서울본부 등)는 **노선이 아니다** — 여기에 넣으면 안 된다.
     # upsert의 COALESCE가 먼저 온 값을 지키므로, 지역본부가 line을 차지하면
     # 나중에 시각표의 실제 주운행선명(경부선)이 영영 들어오지 못한다.
@@ -128,11 +145,36 @@ def _to_float(value: str | None) -> float | None:
         return None
 
 
+def _read_records(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """CSV/XLSX 공통 리더. (헤더, 행 딕셔너리 목록).
+
+    공공데이터는 표준데이터를 XLSX로만 주는 경우가 있다
+    (예: 전국_도시철도역사정보). 변환을 사람에게 시키지 않는다.
+    """
+    if path.suffix.lower() in (".xlsx", ".xlsm"):
+        try:
+            import openpyxl  # noqa: PLC0415
+        except ImportError:  # pragma: no cover
+            raise SystemExit(
+                "XLSX를 읽으려면 openpyxl이 필요하다: uv sync (dev 그룹에 포함)"
+            ) from None
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb[wb.sheetnames[0]]
+        rows = ws.iter_rows(values_only=True)
+        headers = [str(h).strip() if h is not None else "" for h in next(rows)]
+        records = [
+            {h: ("" if v is None else str(v)) for h, v in zip(headers, row)} for row in rows
+        ]
+        wb.close()
+        return headers, records
+
+    reader = csv.DictReader(io.StringIO(_read_text(path)))
+    return list(reader.fieldnames or []), list(reader)
+
+
 def parse_rows(path: Path) -> tuple[list[Station], list[str], int]:
-    """CSV → Station 목록. (역, 못 알아본 헤더, 건너뛴 행 수)."""
-    text = _read_text(path)
-    reader = csv.DictReader(io.StringIO(text))
-    headers = list(reader.fieldnames or [])
+    """CSV/XLSX → Station 목록. (역, 못 알아본 헤더, 건너뛴 행 수)."""
+    headers, records = _read_records(path)
     mapping, unknown = map_headers(headers)
 
     if "name" not in mapping:
@@ -144,7 +186,7 @@ def parse_rows(path: Path) -> tuple[list[Station], list[str], int]:
 
     stations: list[Station] = []
     skipped = 0
-    for row in reader:
+    for row in records:
         name = normalize_name(row.get(mapping["name"], ""))
         if not name:
             skipped += 1
@@ -200,12 +242,31 @@ def dedupe(stations: list[Station]) -> list[Station]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="역 마스터 CSV를 station 테이블에 적재한다")
-    parser.add_argument("files", nargs="*", type=Path, help=f"CSV 파일 (기본: {DEFAULT_DIR}/*.csv)")
+    parser = argparse.ArgumentParser(
+        description="역 마스터 CSV/XLSX를 station 테이블에 적재한다",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=USAGE_EPILOG,
+    )
+    parser.add_argument("files", nargs="*", type=Path, help=f"CSV/XLSX (기본: {DEFAULT_DIR}/*)")
     parser.add_argument("--dry-run", action="store_true", help="적재하지 않고 무엇이 들어갈지만 보여준다")
+    parser.add_argument(
+        "--passenger",
+        action="store_true",
+        help="이 파일의 역을 여객역으로 확정한다(usable=1). 여객역 목록임이 확실한 파일에만 쓴다",
+    )
+    parser.add_argument(
+        "--coords-only",
+        action="store_true",
+        help="이미 있는 역의 좌표만 채운다. 새 역을 만들지 않는다 (도시철도 등 넓은 좌표 소스용)",
+    )
     args = parser.parse_args()
 
-    files = args.files or sorted(DEFAULT_DIR.glob("*.csv"))
+    if args.passenger and args.coords_only:
+        raise SystemExit("--passenger 와 --coords-only 는 함께 쓸 수 없다")
+
+    files = args.files or sorted(
+        p for p in DEFAULT_DIR.glob("*") if p.suffix.lower() in (".csv", ".xlsx", ".xlsm")
+    )
     if not files:
         raise SystemExit(
             f"CSV가 없다. {DEFAULT_DIR} 에 파일을 넣거나 경로를 인자로 주어라.\n"
@@ -255,11 +316,34 @@ def main() -> None:
                     print(f"       … 외 {len(collisions) - 8}건")
 
             if not args.dry_run:
-                for s in stations:
-                    upsert(conn, s, source=path.name, now=now)
+                if args.coords_only:
+                    filled = sum(
+                        1 for s in stations if fill_coords_only(conn, s, source=path.name, now=now)
+                    )
+                    print(f"   → 기존 역의 좌표 {filled}개를 채웠다 (새 역은 만들지 않았다)")
+                else:
+                    for s in stations:
+                        upsert(
+                            conn,
+                            Station(
+                                name=s.name,
+                                code=s.code,
+                                lat=s.lat,
+                                lng=s.lng,
+                                line=s.line,
+                                usable=args.passenger,
+                            ),
+                            source=path.name,
+                            now=now,
+                        )
 
         if args.dry_run:
-            print(f"\n[dry-run] 적재하지 않았다. 파싱된 행 {total_parsed}개.")
+            mode = (
+                "좌표만 채움(새 역 없음)"
+                if args.coords_only
+                else ("여객역으로 확정(usable=1)" if args.passenger else "코드 사전(usable=0)")
+            )
+            print(f"\n[dry-run] 적재하지 않았다. 모드: {mode}. 파싱된 행 {total_parsed}개.")
             print(f"          현재 station 테이블: {before}개 (좌표 {before_coords}개)")
             return
 
