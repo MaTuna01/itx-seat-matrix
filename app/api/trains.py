@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
 from app.adapters.delay_zero import ZeroDelayAdapter
+from app.adapters.korail2_adapter import CredentialsRequired, TrainStopsNotCached
 from app.adapters.korail_port import KorailPort
 from app.adapters.seatmap_fetcher import SCREEN_RETRY, fetch_matrix
 from app.auth.session import current_user
@@ -94,7 +95,10 @@ async def search_trains(
             at = datetime.combine(date, _time.fromisoformat(time), tzinfo=KST)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail='time 형식은 "HH:MM"이다') from exc
-    return await port.search_trains(cred, date, from_station, to_station, at)
+    try:
+        return await port.search_trains(cred, date, from_station, to_station, at)
+    except CredentialsRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{train_no}/matrix", response_model=MatrixOut)
@@ -121,6 +125,8 @@ async def get_matrix(
 
     try:
         stops = await port.get_stops(cred, train_no, date)
+    except TrainStopsNotCached as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="열차를 찾을 수 없습니다") from exc
     names = [s.name for s in stops]
@@ -159,18 +165,23 @@ async def get_matrix(
     # 60초 TTL 캐시는 **화면 전용**이다 — 새로고침 연타를 흡수한다.
     # 스케줄러는 이 경로를 쓰지 않고 cache=None + SCHEDULER_RETRY로 항상 실조회한다 (D-17).
     # 재시도도 화면용으로 짧게 간다 — 30초×3이면 최악 60초간 응답이 멈춘다 (D-27).
-    matrix = await fetch_matrix(
-        port,
-        cred,
-        train_no,
-        date,
-        names,
-        start_idx,
-        end_idx,
-        now=now,
-        cache=SqliteSeatMapCache(conn),
-        retry=SCREEN_RETRY,
-    )
+    try:
+        matrix = await fetch_matrix(
+            port,
+            cred,
+            train_no,
+            date,
+            names,
+            start_idx,
+            end_idx,
+            now=now,
+            cache=SqliteSeatMapCache(conn),
+            retry=SCREEN_RETRY,
+        )
+    except CredentialsRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     sub_status = SubscriptionStatus.SEATED if my_car is not None else SubscriptionStatus.STANDING
     verdict = build_verdict(

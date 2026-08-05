@@ -47,8 +47,13 @@ from app.storage import train_stops as stop_repo
 from app.storage.db import get_conn
 
 
-class CredentialsRequired(RuntimeError):
-    """코레일 계정이 연결되지 않았다. `PUT /api/me/korail`로 먼저 등록해야 한다."""
+class CredentialsRequired(ValueError):
+    """코레일 계정이 연결되지 않았다. `PUT /api/me/korail`로 먼저 등록해야 한다.
+
+    `ValueError`를 상속한다 — `seatmap_fetcher._with_retry`가 이미 "다시 불러도
+    같은 결과인 것"은 `ValueError`로 재시도 제외 처리한다. 계정 미연결은 재시도
+    30초/2초씩 기다려도 저절로 풀리지 않으므로 같은 취급이 맞다.
+    """
 
 
 class TrainStopsNotCached(RuntimeError):

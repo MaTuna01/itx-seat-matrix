@@ -12,10 +12,12 @@ from datetime import date, datetime, timedelta
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.adapters.korail2_adapter import CredentialsRequired, TrainStopsNotCached
+from app.api.deps import get_korail_port
 from app.domain.models import KST
 from app.storage.db import connect, db_path, dt_from_db
 from app.storage.stations import Station, upsert
-from tests.conftest import enable_signup
+from tests.conftest import enable_signup, stop_infos
 
 # 목업 열차는 운행일 08:00~08:56에 달린다. 내일 날짜를 쓰면 "운행 전"이 확정돼
 # 현재 구간이 시계와 무관하게 0이 된다 (테스트 결정성)
@@ -406,6 +408,82 @@ class TestMatrix:
         )
         assert res.status_code == 200
         assert res.json()["position_source"] == "schedule"
+
+
+class _CredentialsRequiredPort:
+    """`Korail2Adapter`가 계정 미연결일 때의 동작을 흉내낸다."""
+
+    async def list_stations(self):
+        return []
+
+    async def search_trains(self, cred, d, frm, to, at=None):
+        raise CredentialsRequired("코레일 계정이 연결되지 않았습니다.")
+
+    async def get_train_name(self, train_no, d):
+        return None
+
+    async def get_stops(self, cred, train_no, d):
+        return stop_infos()
+
+    async def get_seat_map(self, cred, train_no, d, frm, to):
+        raise CredentialsRequired("코레일 계정이 연결되지 않았습니다.")
+
+
+class _TrainStopsNotCachedPort:
+    """`Korail2Adapter`가 정차역 캐시 미스일 때의 동작을 흉내낸다 (D-29)."""
+
+    async def list_stations(self):
+        return []
+
+    async def search_trains(self, cred, d, frm, to, at=None):
+        return []
+
+    async def get_train_name(self, train_no, d):
+        return None
+
+    async def get_stops(self, cred, train_no, d):
+        raise TrainStopsNotCached("열차 9999의 정차역이 캐시에 없다.")
+
+    async def get_seat_map(self, cred, train_no, d, frm, to):
+        raise AssertionError("get_stops에서 이미 끝났어야 한다")
+
+
+class TestKorailErrorMapping:
+    """계정 미연결/정차역 캐시 미스가 500이 아니라 의미 있는 상태코드로 나가는지.
+
+    실사용(ADAPTER=korail2) 중 `CredentialsRequired`/`TrainStopsNotCached`가
+    그대로 노출돼 500이 나던 버그의 회귀 테스트다.
+    """
+
+    def _override(self, port):
+        app.dependency_overrides[get_korail_port] = lambda: port
+
+    def teardown_method(self):
+        app.dependency_overrides.pop(get_korail_port, None)
+
+    def test_계정_미연결_matrix조회는_409(self, client):
+        self._override(_CredentialsRequiredPort())
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        assert res.status_code == 409
+
+    def test_계정_미연결_열차검색은_409(self, client):
+        self._override(_CredentialsRequiredPort())
+        res = client.get(
+            "/api/trains/search",
+            params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
+        )
+        assert res.status_code == 409
+
+    def test_정차역_캐시_미스는_404(self, client):
+        self._override(_TrainStopsNotCachedPort())
+        res = client.get(
+            "/api/trains/9999/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        assert res.status_code == 404
 
 
 def test_프리셋은_사용자별로_보인다(client, anon_client):

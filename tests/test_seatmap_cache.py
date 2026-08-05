@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from app.adapters.korail2_adapter import CredentialsRequired
 from app.adapters.seatmap_fetcher import (
     NO_RETRY,
     RetryPolicy,
@@ -224,6 +225,16 @@ async def test_value_error_is_not_retried() -> None:
     port = FlakyPort(99, ValueError("목업에 없는 열차번호다"))
     slept: list[float] = []
     with pytest.raises(ValueError):
+        await _run(port, RetryPolicy(attempts=3, delay_seconds=30.0), slept)
+    assert port.attempts == 1
+    assert slept == []
+
+
+async def test_credentials_required_is_not_retried() -> None:
+    """계정 미연결도 '다시 불러도 같은 답'이다 — `ValueError` 상속으로 재시도 제외된다."""
+    port = FlakyPort(99, CredentialsRequired("코레일 계정이 연결되지 않았습니다."))
+    slept: list[float] = []
+    with pytest.raises(CredentialsRequired):
         await _run(port, RetryPolicy(attempts=3, delay_seconds=30.0), slept)
     assert port.attempts == 1
     assert slept == []
