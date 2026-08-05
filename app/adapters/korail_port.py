@@ -14,11 +14,22 @@ from datetime import date as _date
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from app.domain.models import KorailCred, SeatMap, StopInfo, TrainSummary
+from app.domain.models import KorailCred, SeatMap, StationInfo, StopInfo, TrainSummary
 
 
 @runtime_checkable
 class KorailPort(Protocol):
+    async def list_stations(self) -> list[StationInfo]:
+        """역 선택 드롭다운 소스 (D-25).
+
+        역 이름을 타이핑시키면 오타가 곧 404다. 목록은 여전히 데이터에서 오므로
+        원칙 1(하드코딩 금지) 위반이 아니다.
+
+        Phase 2에서는 코레일이 아니라 `station` 테이블(공공데이터)이 소스가 된다 —
+        Phase 0 감사에서 korail2 공개 API에 역 목록이 없음을 확인했다.
+        """
+        ...
+
     async def search_trains(
         self,
         cred: KorailCred | None,
@@ -27,7 +38,19 @@ class KorailPort(Protocol):
         to: str,
         at: datetime | None = None,
     ) -> list[TrainSummary]:
-        """열차 목록 (열차번호 선택용). `GET /api/trains/search` 뒷단."""
+        """열차 목록 (열차번호 선택용). `GET /api/trains/search` 뒷단.
+
+        `at`은 **출발 시각의 하한**이다 — "퇴근하고 탈 수 있는 차"를 고르는 검색이므로
+        정확한 시각이 아니라 이후 열차를 전부 준다 (D-25). None이면 그날 전체.
+        """
+        ...
+
+    async def get_train_name(self, train_no: str, d: _date) -> str | None:
+        """열차명("ITX-마음" 등). 화면 배지 전용이라 없으면 None을 허용한다.
+
+        편성이 여러 개면 열차번호마다 이름이 다르므로 어댑터가 답해야 한다 —
+        기준 편성 이름을 상수로 쓰면 다른 편성에 엉뚱한 이름이 붙는다 (D-25 부수 수정).
+        """
         ...
 
     async def get_stops(self, cred: KorailCred | None, train_no: str, d: _date) -> list[StopInfo]:

@@ -101,6 +101,17 @@ class SeatMap(BaseModel):
     fetched_at: KstDatetime
 
 
+class StationInfo(BaseModel):
+    """역 선택 드롭다운 항목 (D-25).
+
+    Phase 1의 소스는 Mock 노선, Phase 2는 `station` 테이블(공공데이터)이다.
+    `code`는 코레일 역 코드 — Mock에는 없다.
+    """
+
+    name: str
+    code: str | None = None
+
+
 class TrainSummary(BaseModel):
     """열차 선택 화면용 요약 (GET /api/trains/search)."""
 

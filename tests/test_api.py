@@ -327,9 +327,83 @@ def test_프리셋은_사용자별로_보인다(client, anon_client):
     assert anon_client.get("/api/presets").json() == []
 
 
-def test_열차_검색(client):
-    res = client.get(
-        "/api/trains/search", params={"date": RIDE_DATE, "from": "천안", "to": "서울"}
-    )
-    assert res.status_code == 200
-    assert res.json()[0]["train_no"] == "1004"
+class TestTrainPicker:
+    """역 드롭다운 + 시각 하한 검색 (D-25). Phase 1은 Mock, Phase 2에서 소스만 교체."""
+
+    def test_역_목록(self, client):
+        res = client.get("/api/stations")
+        assert res.status_code == 200
+        assert [s["name"] for s in res.json()] == ["천안", "평택", "수원", "안양", "영등포", "서울"]
+
+    def test_역_목록도_인증이_필요하다(self, anon_client):
+        assert anon_client.get("/api/stations").status_code == 401
+
+    def test_시각을_안_주면_그날_전체_편성(self, client):
+        res = client.get(
+            "/api/trains/search", params={"date": RIDE_DATE, "from": "천안", "to": "서울"}
+        )
+        assert res.status_code == 200
+        trains = res.json()
+        assert [t["train_no"] for t in trains] == ["1004", "1008", "1012", "1016"]
+        assert trains[0]["dep_time"].startswith(f"{RIDE_DATE}T08:00:00")
+
+    def test_시각은_정확한_시각이_아니라_하한이다(self, client):
+        """'오후 5시 이후 열차'를 전부 준다 — 통근은 그렇게 고른다."""
+        res = client.get(
+            "/api/trains/search",
+            params={"date": RIDE_DATE, "from": "천안", "to": "서울", "time": "17:00"},
+        )
+        assert [t["train_no"] for t in res.json()] == ["1012", "1016"]
+
+    def test_출발_시각_오름차순(self, client):
+        trains = client.get(
+            "/api/trains/search", params={"date": RIDE_DATE, "from": "천안", "to": "서울"}
+        ).json()
+        assert [t["dep_time"] for t in trains] == sorted(t["dep_time"] for t in trains)
+
+    def test_구간이_뒤집히면_결과가_없다(self, client):
+        res = client.get(
+            "/api/trains/search", params={"date": RIDE_DATE, "from": "서울", "to": "천안"}
+        )
+        assert res.json() == []
+
+    def test_잘못된_시각_형식은_422(self, client):
+        res = client.get(
+            "/api/trains/search",
+            params={"date": RIDE_DATE, "from": "천안", "to": "서울", "time": "오후5시"},
+        )
+        assert res.status_code == 422
+
+    def test_편성마다_열차명이_다르다(self, client):
+        """기준 편성 이름을 상수로 쓰면 다른 편성에 엉뚱한 이름이 붙는다."""
+        def name(train_no):
+            return client.get(
+                f"/api/trains/{train_no}/matrix",
+                params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+            ).json()["train_name"]
+
+        assert name("1004") == "ITX-마음"
+        assert name("1012") == "무궁화호"
+
+    def test_편성마다_좌석표가_다르다(self, client):
+        def seats(train_no):
+            return client.get(
+                f"/api/trains/{train_no}/matrix",
+                params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+            ).json()["seats"]
+
+        assert seats("1004") != seats("1012")
+
+    def test_목업에_없는_열차번호는_404(self, client):
+        res = client.get(
+            "/api/trains/9999/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        assert res.status_code == 404
+        assert client.post(
+            "/api/subscriptions",
+            json={
+                "train_no": "9999", "date": RIDE_DATE, "board_at": "천안",
+                "alight_at": "서울", "status": "STANDING",
+            },
+        ).status_code == 404

@@ -11,7 +11,7 @@ Phase 1 범위 밖:
 from __future__ import annotations
 
 from datetime import date as _date
-from datetime import datetime
+from datetime import datetime, time as _time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -22,7 +22,7 @@ from app.adapters.korail_port import KorailPort
 from app.adapters.seatmap_fetcher import fetch_matrix
 from app.auth.session import current_user
 from app.domain.matrix import query_range
-from app.domain.models import SubscriptionStatus, TrainSummary, User, Verdict
+from app.domain.models import KST, SubscriptionStatus, TrainSummary, User, Verdict
 from app.domain.timeline import estimate_seg, next_poll_hint
 from app.domain.verdict import build_verdict
 
@@ -77,10 +77,18 @@ async def search_trains(
     date: _date,
     from_station: str = Query(alias="from"),
     to_station: str = Query(alias="to"),
+    time: str | None = Query(default=None, description='출발 시각 하한 "HH:MM" (D-25)'),
     user: User = Depends(current_user),
     port: KorailPort = Depends(get_korail_port),
 ) -> list[TrainSummary]:
-    return await port.search_trains(None, date, from_station, to_station)
+    """`time`은 정확한 시각이 아니라 **하한**이다 — "5시 이후 열차"를 전부 준다 (D-25)."""
+    at = None
+    if time:
+        try:
+            at = datetime.combine(date, _time.fromisoformat(time), tzinfo=KST)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail='time 형식은 "HH:MM"이다') from exc
+    return await port.search_trains(None, date, from_station, to_station, at)
 
 
 @router.get("/{train_no}/matrix", response_model=MatrixOut)
@@ -97,7 +105,10 @@ async def get_matrix(
     now = now_kst()
     my_car, my_seat_no = parse_my_seat(my_seat)
 
-    stops = await port.get_stops(None, train_no, date)
+    try:
+        stops = await port.get_stops(None, train_no, date)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="열차를 찾을 수 없습니다") from exc
     names = [s.name for s in stops]
     if board_at not in names or alight_at not in names:
         raise HTTPException(status_code=404, detail="노선에 없는 역입니다")
@@ -108,6 +119,7 @@ async def get_matrix(
             detail="탑승역이 하차역보다 뒤에 있습니다",
         )
 
+    train_name = await port.get_train_name(train_no, date)
     delay_minutes = await delay_port.get_delay_minutes(train_no, date)
     current_seg_idx = estimate_seg(stops, delay_minutes or 0, now)
 
@@ -131,7 +143,7 @@ async def get_matrix(
 
     return MatrixOut(
         train_no=train_no,
-        train_name=getattr(port, "train_name", None) or "ITX",
+        train_name=train_name,
         date=date,
         stops=names,
         current_seg_idx=current_seg_idx,

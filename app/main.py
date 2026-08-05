@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import admin, auth, me, presets, subscriptions, trains
+from app.api import admin, auth, me, presets, stations, subscriptions, trains
 from app.storage.db import init_db
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
@@ -29,6 +29,7 @@ app = FastAPI(title="ITX 자유석 좌석 매트릭스", version="0.1.0", lifesp
 app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(me.router)
+app.include_router(stations.router)
 app.include_router(trains.router)
 app.include_router(subscriptions.router)
 app.include_router(presets.router)

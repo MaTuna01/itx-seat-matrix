@@ -111,7 +111,10 @@ async def _compute_next_poll_at(
 
     30초 틱은 이 포인터만 보고 실행/전진한다 (Phase 3).
     """
-    stops = await port.get_stops(None, train_no, date)
+    try:
+        stops = await port.get_stops(None, train_no, date)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="열차를 찾을 수 없습니다") from exc
     names = [s.name for s in stops]
     if board_at not in names or alight_at not in names:
         raise HTTPException(status_code=404, detail="노선에 없는 역입니다")
