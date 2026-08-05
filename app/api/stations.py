@@ -30,6 +30,6 @@ async def list_stations(
     port: KorailPort = Depends(get_korail_port),
     conn: sqlite3.Connection = Depends(db_session),
 ) -> list[StationInfo]:
-    if rows := station_repo.list_all(conn):
+    if rows := station_repo.list_usable(conn):
         return rows
     return await port.list_stations()

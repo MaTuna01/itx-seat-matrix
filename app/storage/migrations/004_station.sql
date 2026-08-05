@@ -23,6 +23,14 @@ CREATE TABLE IF NOT EXISTS station (
     lat        REAL,               -- 위도. 없으면 NULL → GPS 보정 대상에서 제외
     lng        REAL,               -- 경도
     line       TEXT,               -- 주운행선명 등 참고용
+    -- 여객역으로 **확인된** 행만 1. 드롭다운(D-25)은 이것만 보여준다.
+    -- 역코드 CSV(철도운영정보_역코드)는 1,255행인데 그중 상당수가 '본청'·'서지청'·
+    -- '구로열차소'·'송도교' 같은 **운영 지점**이다. 그 파일만으로는 여객역과 구분할
+    -- 방법이 없으므로 코드 사전으로만 쓰고 usable=0으로 둔다.
+    -- 1이 되는 경로는 두 가지, 둘 다 데이터 근거가 있다 (원칙 1):
+    --   ① 좌표를 얻었다 — '역 위치 정보'(15127532)는 정의상 간선 여객역 202개다
+    --   ② 시각표에 정차역으로 등장했다 — 열차가 서는 곳이면 여객역이다
+    usable     INTEGER NOT NULL DEFAULT 0,
     source     TEXT NOT NULL,      -- 어느 파일에서 왔는지 (재적재·감사용)
     updated_at TEXT NOT NULL       -- KST aware ISO8601
 );
@@ -30,3 +38,4 @@ CREATE TABLE IF NOT EXISTS station (
 -- 좌표가 있는 역만 GPS 투영 대상이다 (D-13)
 CREATE INDEX IF NOT EXISTS idx_station_coords ON station(lat, lng);
 CREATE INDEX IF NOT EXISTS idx_station_code ON station(code);
+CREATE INDEX IF NOT EXISTS idx_station_usable ON station(usable);

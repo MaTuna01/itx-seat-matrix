@@ -48,6 +48,7 @@ class Station:
     lat: float | None = None
     lng: float | None = None
     line: str | None = None
+    usable: bool = False  # 여객역으로 확인됨 → 드롭다운 노출 (004_station.sql 주석 참고)
 
     @property
     def has_coords(self) -> bool:
@@ -60,15 +61,22 @@ def upsert(conn: sqlite3.Connection, station: Station, *, source: str, now: date
     좌표 CSV와 역코드 CSV가 서로 다른 컬럼을 채우므로, 두 파일을 순서와 무관하게
     적재해도 합쳐지도록 `COALESCE(새 값, 기존 값)`으로 병합한다. 이게 없으면
     나중에 적재한 파일이 앞선 파일의 컬럼을 지워버린다.
+
+    `usable`도 같은 이유로 **끄는 방향으로는 덮지 않는다**(`MAX`). 좌표를 얻으면
+    여객역으로 확정되는데, 나중에 코드 사전을 다시 적재해 0으로 되돌리면
+    드롭다운이 조용히 비어버린다.
     """
+    # 좌표가 있으면 그 자체가 여객역 근거다 (15127532는 정의상 간선 여객역이다)
+    usable = 1 if (station.usable or station.has_coords) else 0
     conn.execute(
-        "INSERT INTO station (name, code, lat, lng, line, source, updated_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO station (name, code, lat, lng, line, usable, source, updated_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(name) DO UPDATE SET"
         "   code = COALESCE(excluded.code, station.code),"
         "   lat  = COALESCE(excluded.lat,  station.lat),"
         "   lng  = COALESCE(excluded.lng,  station.lng),"
         "   line = COALESCE(excluded.line, station.line),"
+        "   usable = MAX(excluded.usable, station.usable),"
         "   source = excluded.source,"
         "   updated_at = excluded.updated_at",
         (
@@ -77,10 +85,49 @@ def upsert(conn: sqlite3.Connection, station: Station, *, source: str, now: date
             station.lat,
             station.lng,
             station.line,
+            usable,
             source,
             to_db(now),
         ),
     )
+
+
+def mark_usable(
+    conn: sqlite3.Connection,
+    names: list[str],
+    *,
+    now: datetime,
+    codes: dict[str, str] | None = None,
+) -> int:
+    """시각표에 정차역으로 등장한 역을 여객역으로 확정한다.
+
+    열차가 서는 곳이면 여객역이다 — 이름 목록을 하드코딩하지 않고 데이터로 판별하는
+    두 번째 경로다 (원칙 1). 아직 없는 역은 이름만으로 새로 만든다.
+
+    `codes`(역명 → 역코드)를 주면 **역코드를 덮어쓴다**. 역코드 CSV에는 같은 역명에
+    구/신 코드가 함께 있는 경우가 있는데(`경주` 3900647/3900895 등), 어느 쪽이
+    현재 쓰이는 코드인지는 CSV만으로 알 수 없다. **시각표가 그 답을 안다** —
+    열차가 실제로 그 코드로 운행하므로 여기서는 시각표 값을 권위로 삼는다.
+    """
+    codes = codes or {}
+    touched = 0
+    for raw in names:
+        name = normalize_name(raw)
+        if not name:
+            continue
+        code = codes.get(raw) or codes.get(name)
+        conn.execute(
+            "INSERT INTO station (name, code, usable, source, updated_at)"
+            " VALUES (?, ?, 1, ?, ?)"
+            " ON CONFLICT(name) DO UPDATE SET"
+            "   usable = 1,"
+            "   code = COALESCE(excluded.code, station.code),"
+            "   source = excluded.source,"
+            "   updated_at = excluded.updated_at",
+            (name, code, "timetable", to_db(now)),
+        )
+        touched += 1
+    return touched
 
 
 def count(conn: sqlite3.Connection) -> int:
@@ -93,22 +140,45 @@ def count_with_coords(conn: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
-def list_all(conn: sqlite3.Connection) -> list[StationInfo]:
-    """드롭다운 소스 (D-25). 이름 오름차순."""
-    rows = conn.execute("SELECT name, code FROM station ORDER BY name").fetchall()
+def count_usable(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM station WHERE usable = 1").fetchone()[0]
+
+
+def list_usable(conn: sqlite3.Connection) -> list[StationInfo]:
+    """드롭다운 소스 (D-25). **여객역으로 확인된 것만**, 이름 오름차순.
+
+    역코드 CSV에는 '본청'·'구로열차소'처럼 열차를 탈 수 없는 지점이 절반 이상 섞여
+    있다. 그것을 그대로 노출하면 사용자가 고를 수 없는 역을 고르게 된다.
+    """
+    rows = conn.execute(
+        "SELECT name, code FROM station WHERE usable = 1 ORDER BY name"
+    ).fetchall()
     return [StationInfo(name=r["name"], code=r["code"]) for r in rows]
 
 
 def get(conn: sqlite3.Connection, name: str) -> Station | None:
+    """역 1개 조회. `usable` 여부와 무관하게 찾는다 — 코드 사전 용도도 겸한다."""
     row = conn.execute(
-        "SELECT name, code, lat, lng, line FROM station WHERE name = ?",
+        "SELECT name, code, lat, lng, line, usable FROM station WHERE name = ?",
         (normalize_name(name),),
     ).fetchone()
     if row is None:
         return None
     return Station(
-        name=row["name"], code=row["code"], lat=row["lat"], lng=row["lng"], line=row["line"]
+        name=row["name"],
+        code=row["code"],
+        lat=row["lat"],
+        lng=row["lng"],
+        line=row["line"],
+        usable=bool(row["usable"]),
     )
+
+
+def code_for(conn: sqlite3.Connection, name: str) -> str | None:
+    """역명 → 공공데이터 역코드. 이 CSV의 코드 체계는 운행정보 API의 `stn_cd`와 같다
+    (`3900023 서울`, `3900883 광명`이 양쪽에서 일치함을 실측 확인)."""
+    station = get(conn, name)
+    return station.code if station else None
 
 
 def coords_for(conn: sqlite3.Connection, names: list[str]) -> dict[str, tuple[float, float]]:

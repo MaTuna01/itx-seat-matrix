@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +50,7 @@ from app.storage.db import get_conn, init_db  # noqa: E402
 from app.storage.stations import (  # noqa: E402
     Station,
     count,
+    count_usable,
     count_with_coords,
     normalize_name,
     upsert,
@@ -71,14 +73,29 @@ def _slug(header: str) -> str:
     return "".join(ch for ch in str(header).lower() if ch.isalnum())
 
 
+def _candidates(header: str) -> set[str]:
+    """헤더 하나에서 비교 후보 여러 개를 만든다.
+
+    공공데이터 CSV는 `역코드(STN_CD)`처럼 **한글명(영문코드)** 형태를 자주 쓴다.
+    통째로 슬러그를 만들면(`역코드stncd`) 어느 별칭과도 안 맞으므로,
+    괄호 앞과 괄호 안을 따로 떼어 함께 후보로 넣는다.
+    """
+    text = str(header or "")
+    out = {_slug(text)}
+    if m := re.match(r"^([^(（]*)[(（]([^)）]*)[)）]\s*$", text.strip()):
+        out.add(_slug(m.group(1)))
+        out.add(_slug(m.group(2)))
+    return {c for c in out if c}
+
+
 def map_headers(headers: list[str]) -> tuple[dict[str, str], list[str]]:
     """헤더 → 논리 필드 매핑과, 못 알아본 헤더 목록을 돌려준다."""
     mapping: dict[str, str] = {}
     unknown: list[str] = []
     for header in headers:
-        slug = _slug(header)
+        cands = _candidates(header)
         for field, names in ALIASES.items():
-            if slug in {_slug(n) for n in names}:
+            if cands & {_slug(n) for n in names}:
                 # 같은 필드에 여러 컬럼이 매칭되면 첫 번째만 쓴다
                 mapping.setdefault(field, header)
                 break
@@ -139,6 +156,46 @@ def parse_rows(path: Path) -> tuple[list[Station], list[str], int]:
     return stations, unknown, skipped
 
 
+def find_code_collisions(stations: list[Station]) -> dict[str, list[str]]:
+    """정규화 후 **같은 역명에 서로 다른 역코드**가 붙은 경우를 찾는다.
+
+    역코드 CSV에는 폐역·이설로 구/신 코드가 함께 남아 있다
+    (`경주` 3900647/3900895, `동두천` 3900410/3900412 …). 어느 쪽이 현재 쓰이는
+    코드인지 CSV만으로는 알 수 없으므로 **임의로 고르지 않고 보고한다.**
+    적재는 코드 오름차순의 첫 번째로 **결정적으로** 고정하고, 시각표를 적재할 때
+    권위 있는 값으로 덮는다 (`stations.mark_usable(codes=...)`).
+    """
+    seen: dict[str, set[str]] = {}
+    for s in stations:
+        if s.code:
+            seen.setdefault(s.name, set()).add(s.code)
+    return {n: sorted(c) for n, c in seen.items() if len(c) > 1}
+
+
+def dedupe(stations: list[Station]) -> list[Station]:
+    """역명 기준으로 하나만 남긴다. 코드가 여럿이면 **오름차순 첫 번째**.
+
+    '마지막 행이 이긴다'로 두면 파일 정렬이 바뀔 때 저장되는 코드도 바뀐다 —
+    재현되지 않는 적재는 디버깅이 불가능하다.
+    """
+    best: dict[str, Station] = {}
+    for s in sorted(stations, key=lambda x: (x.name, x.code or "")):
+        prev = best.get(s.name)
+        if prev is None:
+            best[s.name] = s
+            continue
+        # 같은 이름의 뒤 행에서는 빈 칸만 메운다 (코드는 첫 번째를 유지)
+        best[s.name] = Station(
+            name=prev.name,
+            code=prev.code or s.code,
+            lat=prev.lat if prev.lat is not None else s.lat,
+            lng=prev.lng if prev.lng is not None else s.lng,
+            line=prev.line or s.line,
+            usable=prev.usable or s.usable,
+        )
+    return [best[k] for k in sorted(best)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="역 마스터 CSV를 station 테이블에 적재한다")
     parser.add_argument("files", nargs="*", type=Path, help=f"CSV 파일 (기본: {DEFAULT_DIR}/*.csv)")
@@ -163,19 +220,36 @@ def main() -> None:
             if not path.exists():
                 print(f"✗ 없는 파일: {path}")
                 continue
-            stations, unknown, skipped = parse_rows(path)
-            total_parsed += len(stations)
+            raw_rows, unknown, skipped = parse_rows(path)
+            collisions = find_code_collisions(raw_rows)
+            stations = dedupe(raw_rows)
+            total_parsed += len(raw_rows)
             with_coords = sum(1 for s in stations if s.has_coords)
             with_code = sum(1 for s in stations if s.code)
 
             print(f"\n── {path.name}")
-            print(f"   행 {len(stations)}개 (건너뜀 {skipped}) / 좌표 {with_coords} / 역코드 {with_code}")
+            print(
+                f"   행 {len(raw_rows)}개 (건너뜀 {skipped}) → 역명 {len(stations)}개"
+                f" / 좌표 {with_coords} / 역코드 {with_code}"
+            )
             if unknown:
                 print(f"   ⓘ 못 알아본 헤더 (무시됨): {unknown}")
             for s in stations[:5]:
                 print(f"     {s.name:<10} code={s.code or '-':<9} ({s.lat}, {s.lng}) {s.line or ''}")
             if len(stations) > 5:
                 print(f"     … 외 {len(stations) - 5}개")
+
+            if collisions:
+                print(
+                    f"\n   ⚠ 같은 역명에 역코드가 여러 개인 경우 {len(collisions)}건"
+                    " (폐역·이설로 구/신 코드가 함께 남은 것)."
+                )
+                print("     어느 쪽이 현재 코드인지 CSV만으로는 알 수 없어 **오름차순 첫 번째**로")
+                print("     결정적으로 고정한다. 시각표를 적재하면 권위 있는 값으로 덮인다.")
+                for name, codes in list(collisions.items())[:8]:
+                    print(f"       {name:<10} {codes}  → {codes[0]} 채택")
+                if len(collisions) > 8:
+                    print(f"       … 외 {len(collisions) - 8}건")
 
             if not args.dry_run:
                 for s in stations:
@@ -186,14 +260,22 @@ def main() -> None:
             print(f"          현재 station 테이블: {before}개 (좌표 {before_coords}개)")
             return
 
-        after, after_coords = count(conn), count_with_coords(conn)
-        print(f"\n✅ 적재 완료")
+        after, after_coords, usable = count(conn), count_with_coords(conn), count_usable(conn)
+        print("\n✅ 적재 완료")
         print(f"   station {before} → {after}개 (좌표 {before_coords} → {after_coords}개)")
-        no_coords = after - after_coords
-        if no_coords:
+        print(f"   여객역 확정(usable) {usable}개 → 드롭다운에 이만큼 노출된다")
+        if usable == 0:
             print(
-                f"   ⓘ 좌표 없는 역 {no_coords}개 — GPS 보정 대상에서 제외된다 (D-13).\n"
-                f"     좌표 CSV(15127532)를 함께 적재하면 채워진다."
+                "\n   ⚠ 아직 여객역이 하나도 확정되지 않았다 — 드롭다운은 Mock 노선으로 폴백한다.\n"
+                "     이 파일은 '역코드 사전'이라 여객역과 운영 지점(본청·열차소 등)을\n"
+                "     구분할 근거가 없다. 다음 중 하나가 필요하다:\n"
+                "       · 한국철도공사_역 위치 정보 (data.go.kr 15127532) 를 함께 적재 → 좌표가 있으면 여객역\n"
+                "       · 시각표 정차역 적재 (항목 A 확정 후) → 열차가 서면 여객역"
+            )
+        elif after - usable:
+            print(
+                f"   ⓘ 나머지 {after - usable}개는 코드 사전으로만 보관한다"
+                " (본청·열차소 등 운영 지점 포함)"
             )
 
 
