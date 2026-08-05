@@ -3,14 +3,15 @@
 > 개인용 프로젝트. 앱스토어/퍼블릭 배포 없이 사용.
 > 이 문서는 Claude Code로 구현할 때 컨텍스트로 사용한다.
 >
-> **문서 버전: v7**
+> **문서 버전: v8**
 > - v1: Spring Boot + Python 사이드카, 알림 봇 중심
 > - v2: Python 단일 스택으로 전환
 > - v3: 알림을 정식 목표로 승격, 계정(회원) 계층 도입
 > - v4: 알림 채널을 iOS 웹푸시 기본 + 디스코드 opt-in으로 확정
 > - v5: 지연 대응(DelayPort + 정차역당 2회 조회) + GPS 포그라운드 위치 보정
 > - v6: Phase 0 실현 가능성 검증 신설 + 구독 상태 기계(입석/착석) + 알림 체계 재설계(셀 전이 기반) + 운영 디테일 확정
-> - v7: **구현 디테일 확정 — 좌석 유니버스/부재 추론, 인덱스·시각 규칙, 폴링 멱등성(next_poll_at), 알림 합성·베이스라인·기기 정리, 공통 구현 규칙(KST·clock 주입·to_thread)**
+> - v7: 구현 디테일 확정 — 좌석 유니버스/부재 추론, 인덱스·시각 규칙, 폴링 멱등성(next_poll_at), 알림 합성·베이스라인·기기 정리, 공통 구현 규칙(KST·clock 주입·to_thread)
+> - v8: **Phase 1 구현 중 인증 설계 갱신 — 로그인 유지(세션 수명 이원화) + 가입 잠금을 env에서 관리자 토글로**
 >
 > "왜 이렇게 했지?"가 궁금하면 [17. 결정 이력](#17-결정-이력-decision-log)을 먼저 읽을 것.
 > 방향을 튼 지점은 전부 거기에 이유와 함께 남겨두었다.
@@ -327,12 +328,17 @@ class DelayPort(Protocol):
 ### DB 스키마 (SQLite)
 ```sql
 user(id, email UNIQUE, password_hash, display_name,
+     is_admin DEFAULT 0,             -- 첫 계정에만 자동 부여. 가입 허용 토글 권한 (→ D-24)
      korail_id, korail_pw_enc,       -- Phase 0-1 결과 '비로그인 가능'이면 두 컬럼 삭제
      discord_webhook_enc,            -- NULL이면 미연동
      discord_enabled DEFAULT 0,      -- 연동해도 켜야만 발송 (opt-in 2단계)
      created_at)
 
-session(token PK, user_id FK, created_at, expires_at, user_agent)
+session(token PK, user_id FK, created_at, expires_at, user_agent,
+        persistent DEFAULT 0)        -- '로그인 유지' 여부. 슬라이딩 연장 수명을 가른다 (→ D-23)
+
+app_setting(key PK, value, updated_at, updated_by FK)
+            -- 관리자가 런타임에 바꾸는 설정. 현재 키: signup_enabled (→ D-24)
 
 preset(id, user_id FK, name, from_station, to_station,
        usual_train_nos JSON,
@@ -420,15 +426,34 @@ matrix_cache(train_no, date, frm, to, fetched_at, payload JSON)
 
 ### 방식
 - **이메일 + 비밀번호 → 서버 세션 쿠키** (`HttpOnly`, `Secure`, `SameSite=Lax`)
-- 비밀번호 해시: **argon2id** (passlib). 직접 구현 금지
-- 세션은 DB 테이블. 만료 30일, 재접속 시 슬라이딩 연장
+- 비밀번호 해시: **argon2id** (argon2-cffi). 직접 구현 금지
+- 세션은 DB 테이블. 재접속 시 슬라이딩 연장
 - JWT를 쓰지 않는 이유: 1~2인용에서는 세션 테이블이 더 단순하고,
   기기 분실 시 **즉시 무효화**가 되며, 리프레시 토큰 로직이 통째로 불필요 (→ D-10)
 
-### 가입 잠금
-- `ALLOW_SIGNUP=true`일 때만 `POST /api/auth/signup` 활성
-- 첫 계정 생성 후 env를 `false`로 되돌린다 (부트스트랩 1회)
-- 공개 노출을 안 하더라도 **가입 엔드포인트를 열어둘 이유가 없다**
+### 로그인 유지 (remember me) — 세션 수명 이원화 *(v8 → D-23)*
+로그인 폼의 **"로그인 유지" 체크박스**로 세션 수명을 두 갈래로 나눈다.
+쿠키와 서버 세션 **양쪽 모두**를 바꾼다 — 쿠키만 세션 쿠키로 해봐야 서버 세션이
+30일 살아 있으면 탈취된 토큰의 유효기간은 그대로다.
+
+| 체크 | 쿠키 | 서버 세션 만료 | 용도 |
+|---|---|---|---|
+| **on** (지속) | `Max-Age` 30일 | 30일 (슬라이딩) | 내 폰 홈화면 앱 — 매일 쓰는 기본 경로 |
+| **off** (기본값) | `Max-Age` 없음 = 브라우저 세션 쿠키 | **12시간** (슬라이딩) | 공용/임시 브라우저 |
+
+- 기본값은 **해제**다. 보안 기본값을 안전한 쪽에 둔다
+- `session.persistent` 컬럼에 어느 갈래인지 기록한다 — 슬라이딩 연장 시 같은 수명으로 늘려야 하므로
+- 수명은 설정값(`SESSION_DAYS`, `SESSION_TRANSIENT_HOURS`)으로 격리 (D-17 원칙)
+
+### 가입 잠금 — 관리자 토글 *(v8, D-10 개정 → D-24)*
+- 가입 허용 여부는 **env가 아니라 DB**(`app_setting.signup_enabled`)에 둔다.
+  기본값은 **false**(잠김) — "열어둘 이유가 없는 엔드포인트는 닫는다"는 D-10의 취지는 유지
+- **첫 계정은 부트스트랩으로 항상 허용**한다 (사용자 0명이면 잠금과 무관하게 가입 가능).
+  그 첫 계정이 **관리자**(`user.is_admin = 1`)가 된다
+- 관리자는 `GET/PATCH /api/admin/settings`로 가입 허용을 켜고 끈다.
+  지인에게 계정을 열어줄 때 **재배포 없이** 켰다 끄면 된다
+- 관리자 지정은 첫 계정 자동 부여뿐이다. 승격 API는 만들지 않는다 (1~2인용에 과함 —
+  필요하면 DB에서 직접 바꾼다)
 
 ### 코레일 자격증명 — **확정: 로그인 필수 + 본계정 + 안티봇 우회 의존** (Phase 0 결과, → D-14, D-22)
 부계정 미보유로 항목 2가 끝내 미검증됐고, 개인용·저빈도·조회 전용이라는 프로젝트 성격상
@@ -444,16 +469,23 @@ matrix_cache(train_no, date, frm, to, fetched_at, payload JSON)
   이 저장소 안의 벤더 코드는 영향받지 않는다 (확정, D-22 개정)
 
 ### 프론트
-- 최초 1회 로그인 후 세션 쿠키가 유지되므로 **홈화면 앱에서 매번 로그인할 일은 없다**
+- 최초 1회 로그인(+ "로그인 유지" 체크) 후 세션 쿠키가 유지되므로
+  **홈화면 앱에서 매번 로그인할 일은 없다**
 - 401 응답 시 로그인 화면으로 라우팅
+- 설정 화면에 로그아웃 + (관리자에게만) 가입 허용 토글
 
 ## 7. REST API
 
 ```
-POST   /api/auth/signup      { email, password, display_name }   # ALLOW_SIGNUP일 때만
-POST   /api/auth/login       { email, password } → Set-Cookie
+POST   /api/auth/signup      { email, password, display_name, remember? }
+       # 사용자 0명(부트스트랩) 또는 signup_enabled=true일 때만. 첫 계정은 관리자 (→ D-24)
+POST   /api/auth/login       { email, password, remember? } → Set-Cookie
+       # remember=true면 지속 쿠키 30일, 아니면 브라우저 세션 쿠키 + 12시간 (→ D-23)
 POST   /api/auth/logout
-GET    /api/me               → { id, email, display_name, korail_linked: bool }
+GET    /api/me               → { id, email, display_name, is_admin, korail_linked: bool }
+
+GET    /api/admin/settings                    → { signup_enabled: bool }   # 관리자만 (403)
+PATCH  /api/admin/settings   { signup_enabled: bool }                      # 관리자만 (→ D-24)
 PUT    /api/me/korail        { korail_id, korail_pw }   # Phase 0 결과 '로그인 필수'일 때만 존재
 PUT    /api/me/discord       { webhook_url }            # 암호화 저장, 저장 시 테스트 발송
 PATCH  /api/me/discord       { enabled: bool }          # 알림 on/off 토글
@@ -757,7 +789,8 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - [ ] **탄력적 IP 붙이지 말 것** — Tailscale 주소로 접근하므로 불필요하고 미사용 시 과금
 - [ ] `restart: unless-stopped`로 재부팅 자동 복구
 - [ ] SQLite 파일 볼륨 마운트. **계정·자격증명이 들어가므로 백업 파일 취급 주의**
-- [ ] `.env`: `SECRET_KEY`(Fernet), 세션 시크릿, VAPID 키쌍, `ALLOW_SIGNUP`
+- [ ] `.env`: `SECRET_KEY`(Fernet), 세션 시크릿, VAPID 키쌍
+      (가입 허용은 env가 아니라 DB — 관리자가 앱에서 토글한다 → D-24)
       (디스코드 웹훅은 env가 아니라 **DB의 user 행**에 저장됨 — 사용자별 설정이므로)
 - [ ] `.gitignore`에 `.env`, `*.db` 확인
 
@@ -863,7 +896,7 @@ itx-seat-matrix/
 PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐다고 가정 — 결과는 0절 참고)
 - Python 3.12, FastAPI, Pydantic v2, uv
 - 폴더 구조는 PLAN.md 15절 준수
-- User 모델 + 세션 쿠키 로그인부터 (argon2, ALLOW_SIGNUP 플래그)
+- User 모델 + 세션 쿠키 로그인부터 (argon2, 로그인 유지 D-23, 가입 잠금은 관리자 토글 D-24)
   모든 도메인 테이블에 user_id FK를 처음부터 포함
 - subscription은 status(STANDING/SEATED) + last_cells_snapshot 포함,
   PATCH /api/subscriptions/{id}로 상태 전이 (SEATED인데 좌석 없으면 422)
@@ -997,6 +1030,7 @@ PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐�
 - **왜 소셜 로그인이 아닌가**: OAuth 콜백·리디렉트 설정이 Tailscale 내부망과 궁합이 나쁘고,
   1인용에 얻는 게 없음
 - **가입은 잠근다**: `ALLOW_SIGNUP` 플래그로 부트스트랩 1회만 허용 후 `false`.
+  *(v8에서 개정 — 잠금을 env가 아니라 DB의 관리자 토글로 옮김 → D-24. 기본 잠김은 유지)*
   공개 노출을 안 하더라도 **열어둘 이유가 없는 엔드포인트는 닫는다**
 - **부수 효과 (의도치 않게 좋았던 점)**:
   코레일 자격증명이 `.env`에서 **DB의 user 행 + Fernet 암호화**로 이동하면서,
@@ -1244,3 +1278,33 @@ PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐�
 - **근거**: 항목 3(순수성)이 최우선 게이트였고, 이게 YES로 확정된 이상 나머지는 트레이드오프
   판단의 문제였다. 개인용 도구에서 "서비스가 자동화를 거부하는 신호"의 무게는 공개 서비스와
   다르게 본다 — 이 프로젝트는 처음부터 앱스토어 배포·공개 노출이 없다(2절 비목표, D-1).
+### D-23. 로그인 유지 체크박스 — 세션 수명 이원화 *(v8, Phase 1 구현 중)*
+- **문제**: v7까지 세션은 무조건 30일 지속 쿠키였다. 내 폰에서는 그게 맞지만,
+  공용 PC나 잠깐 빌린 기기에서 한 번 로그인하면 **30일짜리 자격증명이 그 기기에 남는다.**
+  Tailscale 내부망이라 노출면이 좁을 뿐, 세션 토큰 자체의 수명은 그대로다
+- **결정**: 로그인 폼에 "로그인 유지" 체크박스를 두고 **쿠키와 서버 세션을 함께** 가른다
+  - on: `Max-Age` 30일 쿠키 + 서버 세션 30일
+  - off(기본): `Max-Age` 없는 브라우저 세션 쿠키 + 서버 세션 **12시간**
+- **왜 쿠키만 바꾸지 않는가**: 쿠키만 세션 쿠키로 바꾸면 브라우저에서는 사라져도
+  **서버 세션 행은 30일 살아 있다.** 그사이 유출된 토큰은 그대로 유효하므로 반쪽짜리다
+- **`session.persistent` 컬럼을 두는 이유**: 슬라이딩 연장 때 어느 수명으로 늘릴지
+  알아야 한다. 없으면 임시 세션이 접속할 때마다 30일로 승격돼 규칙이 무의미해진다
+- **기본값을 해제로 둔 이유**: 보안 기본값은 안전한 쪽. 매일 쓰는 홈화면 앱에서는
+  한 번 체크하면 그만이다
+- **재검토 조건**: 홈화면 PWA에서 체크했는데도 세션이 자주 끊기면 수명·슬라이딩 정책 재조정
+
+### D-24. 가입 잠금: env `ALLOW_SIGNUP` → **관리자 토글** *(v8, D-10 개정)*
+- **문제**: D-10의 잠금은 "첫 계정 만들고 env를 false로 되돌린다"였다.
+  잠금 주체가 **배포 아티팩트**라, 지인에게 계정 하나 열어주려면 env를 고치고
+  컨테이너를 재시작해야 한다. 열어둔 뒤 되돌리는 걸 잊으면 그대로 열린 채 남는다
+- **결정**:
+  1. 가입 허용 여부를 **DB**(`app_setting.signup_enabled`, 기본 false)로 옮긴다
+  2. **첫 계정은 부트스트랩으로 항상 허용**(사용자 0명일 때)하고, 그 계정이 **관리자**가 된다
+  3. 관리자만 `GET/PATCH /api/admin/settings`로 토글한다. env `ALLOW_SIGNUP`은 삭제
+- **D-10과의 관계**: "열어둘 이유가 없는 엔드포인트는 닫는다"는 **그대로 유지**된다.
+  바뀐 것은 잠금의 **위치**(배포 아티팩트 → DB)와 **주체**(재배포 → 관리자)뿐이고,
+  기본값이 잠김이라는 점도 같다. 오히려 켠 뒤 끄는 비용이 없어져 실제로 더 자주 닫히게 된다
+- **관리자 승격 API를 만들지 않는 이유**: 1~2인용에서 권한 관리 화면은 과하다.
+  관리자는 첫 계정 자동 부여뿐이고, 바꿀 일이 생기면 DB에서 직접 고친다
+- **비목표와의 경계**: 2절의 "회원가입 개방"은 여전히 비목표다. 이 토글은
+  **닫힌 상태를 기본으로 두고 필요할 때만 잠깐 여는** 장치이지 공개 가입이 아니다
