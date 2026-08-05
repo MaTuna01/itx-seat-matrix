@@ -1002,6 +1002,55 @@ G. station 테이블 적재 → ① domain/geo.py 선분 투영 + /matrix의 lat
 pytest 전부 통과(어댑터는 스모크 수준으로 충분).
 ```
 
+### Phase 2 이어받기 — 실조회 검증만 남음 *(2026-08-05 중단 지점. 새 세션에서 이 블록을 붙여넣는다)*
+
+```
+PLAN.md 11절 Phase 2(코레일 실연동)를 이어서 한다. **코드는 A~G 전부 구현됐고,
+남은 건 실조회 검증 하나다.** 상태:
+
+- 이슈 #5(OPEN), 브랜치 feat/korail-integration. dev 대비 18커밋, **원격 브랜치 없음 = 전부 미푸시**.
+  Phase 1 PR도 아직 dev에 안 갔다. 푸시·머지는 내가 한다.
+- pytest 279 통과. 마지막 커밋 3f2c10d(실조회 중 발견한 500 누출 수정).
+- 항목 A~G 완료, 결정 이력 D-26~D-30 기록됨. 16절 Phase 2 블록의 "열린 항목"(5절 부호 오기)은
+  D-26으로 해소됐다.
+- .env: ADAPTER=korail2, SECRET_KEY 채워짐, DATA_GO_KR_SERVICE_KEY 있음.
+- 개발 DB(data/itx.db): station 1235행(usable 282), train_stop 920개 열차/10060행,
+  user 1, subscription 2. **korail 계정 연결 0 = 이게 유일한 블로커다.**
+
+## 남은 일 (완료 기준 그 자체)
+
+1. **코레일 계정 연결.** 프론트에 연결 UI가 없어서 curl로 PUT /api/me/korail을 해야 한다.
+   → 여기서 먼저 물어볼 것: **최소 연결 UI를 web/에 만들까, curl로 계속 갈까.**
+   Phase 2 완료 기준에는 UI가 없지만, 실사용 시작하면 매번 curl은 불편하다.
+2. 서버 기동(ADAPTER=korail2) 후 실조회 성공 확인. 호출은 최소 횟수만.
+   - 캐시에 있고 통근 노선(천안→평택→수원→안양→영등포→서울)을 그대로 지나는 열차 = **1160번**.
+   - **먼저 GET /api/trains/search로 그 번호가 오늘 실제로 도는지 확인해라** — D-29의 번호 개정
+     리스크 때문에 캐시된 번호가 이미 폐기됐을 수 있다. 없으면 검색 결과의 번호로 바꿔 진행하되,
+     그 번호가 train_stop 캐시에 없으면 404가 정상 동작이다(scripts/load_train_stops.py 재적재).
+   - GPS 보정까지 보려면 lat/lng/gps_accuracy_m/gps_fixed_at_ms 4개를 다 넘긴다
+     (일부만 오면 무시가 정상, D-30). position_source="gps"가 나와야 성공.
+3. 검증 끝나면 **.env를 ADAPTER=mock으로 되돌린다** (평소 개발은 Mock, CLAUDE.md 10).
+4. 그 다음 PR: .github/PullRequestTemplate.md, base dev, 제목 "[#5] Phase 2 코레일 실연동",
+   본문에 Closes #5. 푸시·머지는 내가 한다.
+
+## 실조회에서 터질 만한 것 (에러 → 원인)
+
+- 409 → 코레일 계정 미연결 (위 1번)
+- 404 + "정차역이 캐시에 없다" → 번호 개정 or 미적재 열차 (D-29)
+- MACRO ERROR → DynaPath 우회가 깨졌다. 고정 커밋 4b13426의 알고리즘이 코레일 쪽 변경으로
+  무효화된 경우다. **여기서 멈추고 보고해라** — 우회 재분석은 내 승인이 필요하다.
+- 500 → 남은 에러 매핑 누락이다. 3f2c10d에서 CredentialsRequired/TrainStopsNotCached는 잡았지만
+  다른 경로가 있을 수 있다.
+
+## 지킬 것 (Phase 2 블록과 동일 — 재확인)
+
+- 실 코레일 API를 루프로 때리지 마라. 개발·디버깅은 ADAPTER=mock.
+- 실 자격증명·우회 코드를 건드리는 스크립트는 네가 실행하지 말고 명령만 알려줘라.
+- 개발 DB(data/itx.db)를 삭제·초기화하지 마라. 내 계정이 들었고 가입이 잠겨 복구가 번거롭다.
+- 시크릿은 .env에만. **커밋 전 .env.example diff를 반드시 확인해라** — 실 키가 새어든 사고가 2회 있었다.
+- Phase 3 영역(NotifierPort/웹푸시/디스코드/APScheduler 폴링/PWA service worker)은 만들지 않는다.
+```
+
 ---
 
 ## 17. 결정 이력 (Decision Log)
