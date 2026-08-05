@@ -16,13 +16,13 @@ from datetime import datetime, time as _time
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from app.api.deps import get_delay_port, get_korail_port, now_kst
+from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
 from app.adapters.delay_zero import ZeroDelayAdapter
 from app.adapters.korail_port import KorailPort
 from app.adapters.seatmap_fetcher import fetch_matrix
 from app.auth.session import current_user
 from app.domain.matrix import query_range
-from app.domain.models import KST, SubscriptionStatus, TrainSummary, User, Verdict
+from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
 from app.domain.timeline import estimate_seg, next_poll_hint
 from app.domain.verdict import build_verdict
 
@@ -80,6 +80,7 @@ async def search_trains(
     time: str | None = Query(default=None, description='출발 시각 하한 "HH:MM" (D-25)'),
     user: User = Depends(current_user),
     port: KorailPort = Depends(get_korail_port),
+    cred: KorailCred | None = Depends(get_korail_cred),
 ) -> list[TrainSummary]:
     """`time`은 정확한 시각이 아니라 **하한**이다 — "5시 이후 열차"를 전부 준다 (D-25)."""
     at = None
@@ -88,7 +89,7 @@ async def search_trains(
             at = datetime.combine(date, _time.fromisoformat(time), tzinfo=KST)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail='time 형식은 "HH:MM"이다') from exc
-    return await port.search_trains(None, date, from_station, to_station, at)
+    return await port.search_trains(cred, date, from_station, to_station, at)
 
 
 @router.get("/{train_no}/matrix", response_model=MatrixOut)
@@ -101,12 +102,13 @@ async def get_matrix(
     user: User = Depends(current_user),
     port: KorailPort = Depends(get_korail_port),
     delay_port: ZeroDelayAdapter = Depends(get_delay_port),
+    cred: KorailCred | None = Depends(get_korail_cred),
 ) -> MatrixOut:
     now = now_kst()
     my_car, my_seat_no = parse_my_seat(my_seat)
 
     try:
-        stops = await port.get_stops(None, train_no, date)
+        stops = await port.get_stops(cred, train_no, date)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="열차를 찾을 수 없습니다") from exc
     names = [s.name for s in stops]
@@ -126,7 +128,7 @@ async def get_matrix(
     # 조회 범위 = 실효 시작 ~ 하차역 (D-17/D-18). 지나온 구간은 호출하지 않는다
     start_idx, end_idx = query_range(current_seg_idx, board_idx, alight_idx)
     matrix = await fetch_matrix(
-        port, None, train_no, date, names, start_idx, end_idx, now=now
+        port, cred, train_no, date, names, start_idx, end_idx, now=now
     )
 
     sub_status = SubscriptionStatus.SEATED if my_car is not None else SubscriptionStatus.STANDING
