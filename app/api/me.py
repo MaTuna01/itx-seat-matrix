@@ -23,6 +23,7 @@ class MeOut(BaseModel):
     id: int
     email: str
     display_name: str
+    is_admin: bool
     korail_linked: bool
     discord_linked: bool
     discord_enabled: bool
@@ -41,6 +42,7 @@ def get_me(
         id=user.id,
         email=user.email,
         display_name=user.display_name,
+        is_admin=user.is_admin,
         korail_linked=bool(row["korail_id"] and row["korail_pw_enc"]),
         discord_linked=bool(row["discord_webhook_enc"]),
         discord_enabled=bool(row["discord_enabled"]),
