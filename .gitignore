@@ -28,3 +28,6 @@ web/dist/
 .DS_Store
 .idea/
 .vscode/
+
+# 로컬 SQLite 데이터 디렉터리
+data/
