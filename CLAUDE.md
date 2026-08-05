@@ -1,0 +1,84 @@
+# CLAUDE.md
+
+ITX 자유석 좌석 매트릭스 — 개인용 통근 도구 (FastAPI + React PWA, 조회 전용).
+**PLAN.md(v7)가 단일 진실 원천이다.** 이 파일은 그 요약이 아니라 작업 규칙이다.
+설계 판단이 필요하면 PLAN.md 해당 절 → 17절 결정 이력(D-1~D-21) 순으로 근거를 찾고,
+그래도 미정의면 **임의로 정하지 말고 물어봐라.**
+
+## 절대 규칙 (조용히 틀리는 지점들)
+
+1. **모든 datetime은 KST aware** (`ZoneInfo("Asia/Seoul")`). naive datetime을 만들면 안 된다.
+   `date`는 열차 운행일 기준.
+2. **시간 의존 함수는 `now: datetime`을 인자로 받는다.** `datetime.now()`를 함수 내부에서
+   직접 부르는 도메인/스케줄러 코드는 리뷰 반려 대상 (테스트 불가능해짐).
+3. **korail2는 동기 라이브러리다.** async 코드에서 직접 호출 금지 — 어댑터 내부에서
+   `asyncio.to_thread`로 감싼다. Port 인터페이스는 async를 유지한다.
+4. **domain/ 은 순수 함수만.** I/O, DB, 네트워크, 전역 상태 접근 금지.
+   외부 연동은 전부 adapters/의 Port 구현 뒤로.
+5. **`last_verdict_hash` / `last_cells_snapshot`은 스케줄러만 기록한다.**
+   사용자 화면 조회(`/matrix`)가 알림 상태를 건드리면 안 된다 (D-13, D-17).
+6. **알림 종류는 5개로 고정** (SEATS_AVAILABLE / MY_SEAT_SOLD / SEAT_EXTENDED /
+   ALL_SOLD / FETCH_FAILED). 새 종류를 추가하지 않는다 (8절 "이것만. 늘리지 말 것").
+7. **역/노선 이름을 코드에 하드코딩하지 않는다** (원칙 1). "수원" 같은 문자열이
+   도메인 로직에 등장하면 잘못된 것이다 (테스트 픽스처는 예외).
+8. **인덱스는 전체 노선 `stops` 기준, 실효 시작 = `max(current_seg_idx, board_idx)`** (D-18).
+9. **모든 `/api/*`는 `Depends(current_user)` 필수.** `user_id`를 쿼리/바디로 받지 않는다.
+   자격증명·웹훅 URL은 API 응답에 절대 노출하지 않는다.
+10. **코레일 호출 예절**: 조회는 정차역당 1~2회 + 실패 재시도(30초×3)가 상한.
+    Semaphore(3) + 지터 유지, 세션은 재사용(만료 시에만 재로그인).
+    개발/디버깅 중에도 실 API를 루프로 때리지 마라 — Mock 어댑터를 써라.
+
+## 아키텍처 경계
+
+```
+api/ ──> domain/ (순수 함수) <── scheduler/
+  │                                │
+  └────────> adapters/ (Port 구현) <┘
+                 │
+             storage/ (SQLite)
+```
+
+- 의존 방향: api·scheduler → domain, adapters. domain은 아무것도 import하지 않는다
+  (models 제외).
+- 어댑터 전환은 env `ADAPTER=mock|korail2`. Phase 1은 Mock만으로 전체를 관통한다.
+- uvicorn `--workers 1` 고정 — APScheduler 인프로세스 (2개면 알림 중복 발사).
+
+## 테스트 규칙 (PLAN.md 13절)
+
+작업 완료 선언 전에 `uv run pytest` 통과가 전제다. **필수** 영역을 건드렸으면
+해당 테스트를 함께 수정/추가해야 완료다:
+
+- `test_verdict.py` — STANDING/SEATED 양쪽, **내 좌석 부재 규칙**, 실효 시작
+- `test_matrix.py` — 병합/조인, 부분 구간, 부재 추론 유니버스 합집합
+- `test_alerts.py` — 13절의 7개 케이스 (침묵해야 할 때 침묵하는지가 핵심)
+- `test_timeline.py` — estimate_seg 경계, 폴 포인터 전진, grace 2분
+- 픽스처의 시간은 전부 `now` 주입으로 시나리오를 만든다. sleep/실제 시계 사용 금지.
+
+어댑터·프론트·api는 스모크/생략 가능 (단 PATCH 상태 전이 422는 확인).
+
+## 작업 방식
+
+- **Phase 순서를 지킨다** (11절). 현재 Phase 범위 밖 기능을 미리 만들지 않는다
+  — 예: Phase 1에서 코레일 실연동·알림 발송 코드를 쓰지 않는다.
+- Phase 0 결과가 "비로그인 가능"이면 자격증명 관련 설계(6절 표)를 **삭제**하는
+  방향으로 구현한다. 결과 확정 전에는 해당 코드를 만들지 않는다.
+- 스택: Python 3.12, FastAPI, Pydantic v2, SQLite(stdlib), **uv** (pip 직접 사용 금지),
+  프론트는 web/에서 Vite + React + 바닐라 CSS.
+- 폴더 구조는 PLAN.md 15절을 따른다. 새 최상위 모듈이 필요하면 먼저 물어봐라.
+- 조정 예정 값(추천 랭킹 가중치, `min_extension_segments`, 다이제스트 상한 등)은
+  **설정값을 가진 순수 함수로 격리** — 매직 넘버를 로직에 인라인하지 않는다 (D-17).
+- 시크릿은 .env로만. `.env`, `*.db`, `scripts/phase0_results/`는 커밋 금지.
+
+## 설계 변경이 필요할 때
+
+구현 중 PLAN.md와 충돌하거나 문서가 침묵하는 지점을 발견하면:
+1. 멈추고 문제를 보고한다 (임의 구현 금지)
+2. 합의된 변경은 PLAN.md 본문 수정 + 17절 결정 이력에 D-항목 추가로 남긴다
+   (뒤집힌 결정도 지우지 않는다 — 개정 이력으로 유지)
+
+## 참조 파일
+
+- `PLAN.md` — 설계 전체. 특히 5절(도메인 규칙), 8절(알림), 9절(스케줄러), 13절(테스트)
+- `seat-matrix.jsx` — 매트릭스 화면 프로토타입이자 verdict 규칙의 참조 구현.
+  `/matrix` 응답 스키마(7절)와 1:1
+- `scripts/phase0_feasibility.py` — Phase 0 검증 (일회성, app/ 코드와 무관)
