@@ -922,6 +922,8 @@ itx-seat-matrix/
 
 ## 16. Claude Code 시작 프롬프트
 
+### Phase 1 (완료)
+
 ```
 PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐다고 가정 — 결과는 0절 참고)
 - Python 3.12, FastAPI, Pydantic v2, uv
@@ -942,6 +944,60 @@ PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐�
 - 프론트는 seat-matrix.jsx를 web/ Vite 프로젝트로 옮기고 목업 상수를 API 호출로 대체
   + 로그인 화면 + 좌석 행 선택 → "이 자리에 앉음" / "일어남" 상태 전이 UI
 - 코레일 연동과 알림 발송은 이 단계에서 하지 않는다 (Phase 2, 3)
+```
+
+### Phase 2 — 코레일 실연동 *(다음 세션에서 이 블록을 그대로 붙여넣는다)*
+
+```
+PLAN.md 11절 Phase 2(코레일 실연동)를 시작한다.
+Phase 1은 완료됐다 — 이슈 #3, 브랜치 feat/phase1-skeleton, pytest 104 통과,
+Mock 어댑터로 로그인→열차 선택→매트릭스→"이 자리에 앉음" 전이까지 관통 확인됨.
+
+착수 전:
+1. Phase 1 PR이 dev에 머지됐는지 확인해라. 안 됐으면 알려줘 — 머지는 내가 한다.
+2. feature 템플릿으로 새 이슈를 발급하고 dev에서 feat/<이름>으로 분기해라. 커밋만 하고 push는 내가 한다.
+
+착수 순서 (앞이 뒤의 전제다):
+A. **get_stops 소스 확정이 최우선.** Phase 0 항목 5 = NO(열차번호 → 전체 정차역 파생 불가)가
+   여전히 미해결이다. 원칙 1(역 하드코딩 금지)의 전제이므로 여기가 막히면 뒤가 다 막힌다.
+   외부 소스(공공데이터포털 열차 정차역 API 등) 후보를 조사해 제시하고,
+   **내 승인 없이 특정 소스로 구현하지 마라.** D-25의 역 마스터(목록·좌표)와 같은 뿌리 문제이니 함께 푼다.
+B. Korail2Adapter (D-22). korail2 본체는 PyPI 정식 릴리스(korail2>=0.4.0)로 의존하고,
+   DynaPath 우회(x-dynapath-m-token 생성 + 헤더 부착)만 adapters/에 **벤더링**한다.
+   원본 = github.com/dhfhfk/korail2 브랜치 bypassDynapath,
+   고정 커밋 4b134266fff097ea0fd54e9f760cb128b6c8f878 (공급망 리뷰 완료된 커밋).
+   korail2는 **동기** 라이브러리다 — 어댑터 내부에서 asyncio.to_thread로 감싼다 (절대규칙 3).
+   세션은 프로세스 내 캐시, **만료 감지 시에만** 재로그인.
+C. 자격증명 저장: PUT /api/me/korail (Fernet, env SECRET_KEY). API 응답에 절대 노출 금지.
+   GET /api/me의 korail_linked가 이미 이 컬럼을 읽는다.
+D. 조회 예절: Semaphore(3)+지터는 adapters/seatmap_fetcher.py에 이미 있다.
+   여기에 재시도(30초×3)와 60초 TTL 캐시를 추가한다 — matrix_cache 테이블 신설,
+   키는 (train_no, date, frm, to), **화면 트래픽 전용이고 스케줄러는 우회**한다 (D-17).
+E. 좌석맵 정규화(열차종별 차이 흡수). 병합은 단순 조인이 맞다 — Phase 0 항목 6 실측 확정.
+   domain/matrix.py의 유니버스 합집합 규칙은 방어용으로 그대로 둔다.
+F. DelayPort 실구현 (D-12). h_expct_dlay_hr는 **6자리 포맷**이다(4자리 hhmm 아님, Phase 0 실측).
+   실패해도 지연 0으로 계속 동작해야 한다.
+G. station 테이블 적재 → ① domain/geo.py 선분 투영 + /matrix의 lat/lng, position_source="gps"
+   ② GET /api/stations의 소스를 Mock에서 station 테이블로 교체 (D-25).
+   GPS 신선도 안전장치(30초 초과·정확도 과대 시 무시)도 함께 (D-21).
+
+지킬 것:
+- **실 코레일 API를 루프로 때리지 마라.** 개발·디버깅은 ADAPTER=mock으로 한다 (CLAUDE.md 10).
+  실 호출은 필요한 최소 횟수만, 무엇을 왜 호출하는지 먼저 말하고 해라.
+- 실 자격증명·우회 코드를 건드리는 스크립트는 **네가 실행하지 말고 명령을 알려줘라.** 내가 직접 돌린다.
+- **개발 DB(data/itx.db)를 삭제·초기화하지 마라.** 내 계정이 들어 있고 가입이 잠겨 있어 복구가 번거롭다.
+  브라우저 검증이 필요하면 DB_PATH를 임시 경로로 지정해 별도 인스턴스로 띄워라.
+- 시크릿은 .env에만. 추적되는 파일(.env.example 포함)에 실제 값을 절대 쓰지 마라.
+- Phase 3 영역(NotifierPort/웹푸시/디스코드/APScheduler 폴링/PWA service worker)은 아직 만들지 않는다.
+- PLAN.md와 충돌하거나 문서가 침묵하는 지점을 만나면 멈추고 보고해라. 합의된 변경은 본문 수정 + D-항목.
+
+열린 항목 (Phase 1에서 보고했으나 문서 미반영):
+- 5절 estimate_seg 표기 `arrival(stops[i]) <= now + 지연보정`이 9절 "실효 도착 = 시각표 + 지연"과
+  **부호가 반대**다. 구현은 물리적으로 맞는 9절 정의를 따랐다(app/domain/timeline.py 주석 참고).
+  5절 문구 수정 + D-항목이 필요하다 — 지연 보정을 실제로 켜는 Phase 2에서 정리하자.
+
+완료 기준: ADAPTER=korail2로 **실제 열차번호 매트릭스 조회 성공**, ADAPTER=mock 폴백 유지,
+pytest 전부 통과(어댑터는 스모크 수준으로 충분).
 ```
 
 ---
