@@ -89,14 +89,28 @@ def _from_env(name: str) -> str:
 def mask(text: str, key: str) -> str:
     """서비스 키가 로그·저장 파일에 남지 않게 가린다."""
     out = text
-    for form in {key, urllib.parse.quote(key, safe=""), urllib.parse.quote_plus(key)}:
+    raw = urllib.parse.unquote(key)  # Encoding/Decoding 두 형태 모두 가린다
+    forms = {key, raw, urllib.parse.quote(raw, safe=""), urllib.parse.quote_plus(raw)}
+    for form in forms:
         if form:
             out = out.replace(form, "***SERVICE_KEY***")
     return out
 
 
+def normalize_key(key: str) -> str:
+    """Encoding/Decoding 어느 형태로 붙여넣어도 동작하게 만든다.
+
+    data.go.kr는 인증키를 두 형태로 준다. Encoding 키(`%2B`/`%2F`/`%3D` 포함)를
+    그대로 `urlencode`에 넘기면 `%`가 다시 인코딩돼(`%252B`) 인증이 실패한다.
+    한 번 풀어두면 `urlencode`가 정확히 한 번만 인코딩한다 — 두 형태가 같은 곳으로 수렴한다.
+    """
+    return urllib.parse.unquote(key)
+
+
 def call(op: str, params: dict[str, str], key: str) -> tuple[int, str]:
-    query = urllib.parse.urlencode({"serviceKey": key, "_type": "json", **params})
+    query = urllib.parse.urlencode(
+        {"serviceKey": normalize_key(key), "_type": "json", **params}
+    )
     url = f"{BASE}/{op}?{query}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
