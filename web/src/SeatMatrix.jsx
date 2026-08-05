@@ -78,12 +78,21 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   };
 
   if (!data) {
+    // 캐시본조차 없는 실패. 여기서 나갈 길을 반드시 남겨야 한다 —
+    // "설정에서 계정을 등록하라"는 에러를 띄우면서 설정으로 갈 수단이 없으면
+    // 재시도만 반복하는 막다른 골목이 된다 (실사용 중 발견).
     return (
       <div style={{ ...st.page, paddingTop: 48 }}>
         <div style={st.card}>
           <p style={st.dim}>{error ? `조회 실패: ${error}` : "좌석 정보를 불러오는 중…"}</p>
           {error && (
-            <button style={st.primaryBtn} onClick={load}>다시 시도</button>
+            <>
+              <button style={st.primaryBtn} onClick={load}>다시 시도</button>
+              <div style={{ ...st.toggleRow, marginTop: 8 }}>
+                <button style={{ ...st.ghostBtn, flex: 1 }} onClick={onOpenSettings}>설정</button>
+                <button style={{ ...st.ghostBtn, flex: 1 }} onClick={onReset}>다른 열차</button>
+              </div>
+            </>
           )}
         </div>
       </div>
