@@ -41,6 +41,15 @@ export const api = {
   setSignupEnabled: (signup_enabled) =>
     request("/api/admin/settings", { method: "PATCH", body: { signup_enabled } }),
 
+  // 역 드롭다운 소스 (D-25). Phase 2에서 station 테이블로 소스만 바뀐다
+  stations: () => request("/api/stations"),
+  // time은 "이 시각 이후 출발" 하한 (HH:MM)
+  searchTrains: ({ date, from, to, time }) => {
+    const params = new URLSearchParams({ date, from, to });
+    if (time) params.set("time", time);
+    return request(`/api/trains/search?${params}`);
+  },
+
   subscriptions: () => request("/api/subscriptions"),
   createSubscription: (payload) =>
     request("/api/subscriptions", { method: "POST", body: payload }),

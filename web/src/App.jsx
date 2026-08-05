@@ -4,7 +4,7 @@ import Login from "./Login";
 import SeatMatrix from "./SeatMatrix";
 import Settings from "./Settings";
 import Setup from "./Setup";
-import { st } from "./styles";
+import { css, st } from "./styles";
 
 // 라우팅: 세션 확인 → (없으면) 로그인 → (활성 구독 없으면) 탑승 등록 → 매트릭스.
 // 401은 어디서 나든 로그인 화면으로 되돌린다 (PLAN 6절).
@@ -37,6 +37,17 @@ export default function App() {
 
   const openSettings = () => setState({ ...state, phase: "settings", from: state.phase });
 
+  // 전역 리셋(box-sizing 등)은 모든 화면에 한 번만 주입한다 —
+  // 매트릭스 화면에서만 주입하면 폼 화면의 input이 padding만큼 넘친다
+  const screen = renderScreen();
+  return (
+    <>
+      <style>{css}</style>
+      {screen}
+    </>
+  );
+
+  function renderScreen() {
   if (state.phase === "loading") {
     return <div style={{ ...st.page, paddingTop: 48 }}><p style={st.dim}>불러오는 중…</p></div>;
   }
@@ -84,4 +95,5 @@ export default function App() {
       })}
     />
   );
+  }
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, cacheMatrix, readCachedMatrix } from "./api";
-import { css, st } from "./styles";
+import { st } from "./styles";
 
 // 프로토타입(seat-matrix.jsx)을 API 연동으로 바꾼 화면.
 // 목업 상수(MOCK_RESPONSE)는 GET /api/trains/{train_no}/matrix 응답으로 대체됐고,
@@ -118,8 +118,6 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
 
   return (
     <div style={st.page}>
-      <style>{css}</style>
-
       {/* ── 헤더: 열차 + 상태 배지 ── */}
       <header style={st.header}>
         <div style={st.trainRow}>

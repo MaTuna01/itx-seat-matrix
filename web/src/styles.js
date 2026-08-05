@@ -142,5 +142,7 @@ export const st = {
     border: "1px solid #eab5ad", borderRadius: 8, padding: "8px 10px",
   },
   segRow: { display: "flex", gap: 8 },
+  // native date/time input은 min-width:auto라 flex로 줄지 않는다 → 겹침 방지
+  segCol: { flex: 1, minWidth: 0 },
   toggleRow: { display: "flex", gap: 8, marginTop: 6 },
 };
