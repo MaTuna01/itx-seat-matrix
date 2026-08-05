@@ -3,14 +3,16 @@
 > 개인용 프로젝트. 앱스토어/퍼블릭 배포 없이 사용.
 > 이 문서는 Claude Code로 구현할 때 컨텍스트로 사용한다.
 >
-> **문서 버전: v7**
+> **문서 버전: v9**
 > - v1: Spring Boot + Python 사이드카, 알림 봇 중심
 > - v2: Python 단일 스택으로 전환
 > - v3: 알림을 정식 목표로 승격, 계정(회원) 계층 도입
 > - v4: 알림 채널을 iOS 웹푸시 기본 + 디스코드 opt-in으로 확정
 > - v5: 지연 대응(DelayPort + 정차역당 2회 조회) + GPS 포그라운드 위치 보정
 > - v6: Phase 0 실현 가능성 검증 신설 + 구독 상태 기계(입석/착석) + 알림 체계 재설계(셀 전이 기반) + 운영 디테일 확정
-> - v7: **구현 디테일 확정 — 좌석 유니버스/부재 추론, 인덱스·시각 규칙, 폴링 멱등성(next_poll_at), 알림 합성·베이스라인·기기 정리, 공통 구현 규칙(KST·clock 주입·to_thread)**
+> - v7: 구현 디테일 확정 — 좌석 유니버스/부재 추론, 인덱스·시각 규칙, 폴링 멱등성(next_poll_at), 알림 합성·베이스라인·기기 정리, 공통 구현 규칙(KST·clock 주입·to_thread)
+> - v8: Phase 1 구현 중 인증 설계 갱신 — 로그인 유지(세션 수명 이원화) + 가입 잠금을 env에서 관리자 토글로
+> - v9: **열차 선택 UX 확정 — 역 드롭다운 + 시각 하한 검색, station 테이블 역할 확장**
 >
 > "왜 이렇게 했지?"가 궁금하면 [17. 결정 이력](#17-결정-이력-decision-log)을 먼저 읽을 것.
 > 방향을 튼 지점은 전부 거기에 이유와 함께 남겨두었다.
@@ -327,12 +329,17 @@ class DelayPort(Protocol):
 ### DB 스키마 (SQLite)
 ```sql
 user(id, email UNIQUE, password_hash, display_name,
+     is_admin DEFAULT 0,             -- 첫 계정에만 자동 부여. 가입 허용 토글 권한 (→ D-24)
      korail_id, korail_pw_enc,       -- Phase 0-1 결과 '비로그인 가능'이면 두 컬럼 삭제
      discord_webhook_enc,            -- NULL이면 미연동
      discord_enabled DEFAULT 0,      -- 연동해도 켜야만 발송 (opt-in 2단계)
      created_at)
 
-session(token PK, user_id FK, created_at, expires_at, user_agent)
+session(token PK, user_id FK, created_at, expires_at, user_agent,
+        persistent DEFAULT 0)        -- '로그인 유지' 여부. 슬라이딩 연장 수명을 가른다 (→ D-23)
+
+app_setting(key PK, value, updated_at, updated_by FK)
+            -- 관리자가 런타임에 바꾸는 설정. 현재 키: signup_enabled (→ D-24)
 
 preset(id, user_id FK, name, from_station, to_station,
        usual_train_nos JSON,
@@ -347,7 +354,8 @@ subscription(id, user_id FK, train_no, date, board_at, alight_at,
              next_poll_at,              -- 다음 폴 포인트. 재시작 내구성의 핵심 (→ D-19)
              last_notified_at, fail_count)
 
-station(code PK, name, lat, lng)       -- 공공데이터 정적 참조. GPS 보정용 (→ D-13)
+station(code PK, name, lat, lng)       -- 공공데이터 정적 참조.
+             -- 용도 2개: ① GPS 보정 좌표 (→ D-13) ② 역 선택 드롭다운 소스 (→ D-25)
 
 push_device(id, user_id FK, endpoint, p256dh, auth, label, created_at)
             -- 기기별 1행. 폰/아이패드 동시 지원
@@ -420,15 +428,34 @@ matrix_cache(train_no, date, frm, to, fetched_at, payload JSON)
 
 ### 방식
 - **이메일 + 비밀번호 → 서버 세션 쿠키** (`HttpOnly`, `Secure`, `SameSite=Lax`)
-- 비밀번호 해시: **argon2id** (passlib). 직접 구현 금지
-- 세션은 DB 테이블. 만료 30일, 재접속 시 슬라이딩 연장
+- 비밀번호 해시: **argon2id** (argon2-cffi). 직접 구현 금지
+- 세션은 DB 테이블. 재접속 시 슬라이딩 연장
 - JWT를 쓰지 않는 이유: 1~2인용에서는 세션 테이블이 더 단순하고,
   기기 분실 시 **즉시 무효화**가 되며, 리프레시 토큰 로직이 통째로 불필요 (→ D-10)
 
-### 가입 잠금
-- `ALLOW_SIGNUP=true`일 때만 `POST /api/auth/signup` 활성
-- 첫 계정 생성 후 env를 `false`로 되돌린다 (부트스트랩 1회)
-- 공개 노출을 안 하더라도 **가입 엔드포인트를 열어둘 이유가 없다**
+### 로그인 유지 (remember me) — 세션 수명 이원화 *(v8 → D-23)*
+로그인 폼의 **"로그인 유지" 체크박스**로 세션 수명을 두 갈래로 나눈다.
+쿠키와 서버 세션 **양쪽 모두**를 바꾼다 — 쿠키만 세션 쿠키로 해봐야 서버 세션이
+30일 살아 있으면 탈취된 토큰의 유효기간은 그대로다.
+
+| 체크 | 쿠키 | 서버 세션 만료 | 용도 |
+|---|---|---|---|
+| **on** (지속) | `Max-Age` 30일 | 30일 (슬라이딩) | 내 폰 홈화면 앱 — 매일 쓰는 기본 경로 |
+| **off** (기본값) | `Max-Age` 없음 = 브라우저 세션 쿠키 | **12시간** (슬라이딩) | 공용/임시 브라우저 |
+
+- 기본값은 **해제**다. 보안 기본값을 안전한 쪽에 둔다
+- `session.persistent` 컬럼에 어느 갈래인지 기록한다 — 슬라이딩 연장 시 같은 수명으로 늘려야 하므로
+- 수명은 설정값(`SESSION_DAYS`, `SESSION_TRANSIENT_HOURS`)으로 격리 (D-17 원칙)
+
+### 가입 잠금 — 관리자 토글 *(v8, D-10 개정 → D-24)*
+- 가입 허용 여부는 **env가 아니라 DB**(`app_setting.signup_enabled`)에 둔다.
+  기본값은 **false**(잠김) — "열어둘 이유가 없는 엔드포인트는 닫는다"는 D-10의 취지는 유지
+- **첫 계정은 부트스트랩으로 항상 허용**한다 (사용자 0명이면 잠금과 무관하게 가입 가능).
+  그 첫 계정이 **관리자**(`user.is_admin = 1`)가 된다
+- 관리자는 `GET/PATCH /api/admin/settings`로 가입 허용을 켜고 끈다.
+  지인에게 계정을 열어줄 때 **재배포 없이** 켰다 끄면 된다
+- 관리자 지정은 첫 계정 자동 부여뿐이다. 승격 API는 만들지 않는다 (1~2인용에 과함 —
+  필요하면 DB에서 직접 바꾼다)
 
 ### 코레일 자격증명 — **확정: 로그인 필수 + 본계정 + 안티봇 우회 의존** (Phase 0 결과, → D-14, D-22)
 부계정 미보유로 항목 2가 끝내 미검증됐고, 개인용·저빈도·조회 전용이라는 프로젝트 성격상
@@ -444,23 +471,33 @@ matrix_cache(train_no, date, frm, to, fetched_at, payload JSON)
   이 저장소 안의 벤더 코드는 영향받지 않는다 (확정, D-22 개정)
 
 ### 프론트
-- 최초 1회 로그인 후 세션 쿠키가 유지되므로 **홈화면 앱에서 매번 로그인할 일은 없다**
+- 최초 1회 로그인(+ "로그인 유지" 체크) 후 세션 쿠키가 유지되므로
+  **홈화면 앱에서 매번 로그인할 일은 없다**
 - 401 응답 시 로그인 화면으로 라우팅
+- 설정 화면에 로그아웃 + (관리자에게만) 가입 허용 토글
 
 ## 7. REST API
 
 ```
-POST   /api/auth/signup      { email, password, display_name }   # ALLOW_SIGNUP일 때만
-POST   /api/auth/login       { email, password } → Set-Cookie
+POST   /api/auth/signup      { email, password, display_name, remember? }
+       # 사용자 0명(부트스트랩) 또는 signup_enabled=true일 때만. 첫 계정은 관리자 (→ D-24)
+POST   /api/auth/login       { email, password, remember? } → Set-Cookie
+       # remember=true면 지속 쿠키 30일, 아니면 브라우저 세션 쿠키 + 12시간 (→ D-23)
 POST   /api/auth/logout
-GET    /api/me               → { id, email, display_name, korail_linked: bool }
+GET    /api/me               → { id, email, display_name, is_admin, korail_linked: bool }
+
+GET    /api/admin/settings                    → { signup_enabled: bool }   # 관리자만 (403)
+PATCH  /api/admin/settings   { signup_enabled: bool }                      # 관리자만 (→ D-24)
 PUT    /api/me/korail        { korail_id, korail_pw }   # Phase 0 결과 '로그인 필수'일 때만 존재
 PUT    /api/me/discord       { webhook_url }            # 암호화 저장, 저장 시 테스트 발송
 PATCH  /api/me/discord       { enabled: bool }          # 알림 on/off 토글
 DELETE /api/me/discord                                  # 연동 해제
 
+GET    /api/stations
+       → 역 목록 (출발/도착역 드롭다운 소스). Phase 1은 Mock 노선, Phase 2는 station 테이블 (→ D-25)
+
 GET    /api/trains/search?date=&from=&to=&time=
-       → 열차 목록 (열차번호 선택용)
+       → 열차 목록 (열차번호 선택용). time = "이 시각 이후 출발" 하한 (HH:MM, → D-25)
 
 GET    /api/trains/{train_no}/matrix?date=&board_at=&alight_at=&my_seat=&lat=&lng=
        → SeatMatrix + Verdict 통합 응답  ★ 프론트의 유일한 핵심 호출
@@ -669,6 +706,17 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - 추가 화면: 로그인 / 프리셋 선택 / 열차 선택 /
   설정(코레일 연동*, 알림 기기, 디스코드 웹훅 연동 + on/off 토글, 테스트 발송)
   (*Phase 0 결과 비로그인 가능이면 코레일 연동 화면 자체가 없음)
+
+### 열차 선택 화면 — 역은 고르는 것이지 입력하는 것이 아니다 *(v9 → D-25)*
+탑승 등록의 첫 화면이다. 코레일 앱과 같은 순서로 좁혀 들어간다:
+1. **출발역 / 도착역을 드롭다운에서 선택** — 역 이름을 타이핑시키지 않는다.
+   오타가 곧 404이고, 사용자는 정식 역명(`서울역`인지 `서울`인지)을 모른다.
+   소스는 `GET /api/stations` (→ 5절 station 테이블, D-25)
+2. **운행일 + 검색 기준 시각** — "오후 5시 이후 열차"처럼 **하한 시각**을 준다.
+   통근은 "몇 시 차"가 아니라 "퇴근하고 탈 수 있는 차"를 고르는 일이다
+3. **열차 목록에서 선택** — `GET /api/trains/search`. 열차명/번호 + 출발·도착 시각
+4. 입석/착석 선택(착석이면 좌석 지정) → 구독 생성 → 매트릭스
+- 프리셋이 있으면 1~2단계를 건너뛴다 (자주 쓰는 구간 = 행 추가, 원칙 1·3)
 - PWA: manifest + service worker + 푸시 수신 핸들러 + `notificationclick` 매트릭스 딥링크 (→ D-20)
 - **푸시 권한 요청은 사용자 제스처에서만 (iOS 제약, → D-21)**: 페이지 로드 시 자동 요청
   코드는 조용히 실패한다. 설정 화면의 "알림 켜기" 버튼 **탭 핸들러 안에서만** 권한 요청
@@ -706,6 +754,8 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - `KorailPort` Protocol + **`MockKorailAdapter`** (프로토타입 목업 데이터 재현)
 - `domain/matrix.py`, `domain/verdict.py`, `domain/alerts.py`, `domain/timeline.py`(estimate_seg + 폴 포인트 계산) + **pytest 단위 테스트** (여기 집중. clock은 전부 `now` 인자 주입 → 공통 구현 규칙)
 - `/matrix` 엔드포인트 + 구독 CRUD/PATCH + 프론트를 API 연동으로 전환, 로그인 화면, 상태 전이 UI
+- **열차 선택 화면 골격** (역 드롭다운 + 시각 하한 검색 + 열차 목록) — 데이터는 Mock,
+  Phase 2에서 소스만 실연동으로 교체한다 (→ D-25). Mock 어댑터는 시각대가 다른 열차 여러 편을 준다
 - ✅ 완료 기준: 로그인 후 목업 데이터로 프로토타입과 동일한 화면이 렌더링되고,
   좌석 행 선택 → "이 자리에 앉음"으로 구독 상태가 바뀐다
 
@@ -718,7 +768,10 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - **지연 정보 소스 확정** (→ D-12): Phase 0-4에서 korail2 내 지연 정보를 확인했으므로,
   ① 있으면 DelayPort 실구현 ② 없으면 공공데이터 실시간 API 검증
   (ITX 커버 여부 / 갱신 주기 / 지연'분' 직접 제공 여부) ③ 미채택 시 ZeroDelay 유지 (2회 조회가 보완)
-- 역 좌표 정적 데이터 적재 (station 테이블, GPS 보정용) + 선분 투영 구간 판정
+- 역 정적 데이터 적재 (station 테이블) — **용도 2개**: GPS 보정 좌표 + 역 선택 드롭다운 소스.
+  Phase 1이 만든 열차 선택 화면의 데이터 소스를 여기로 갈아끼운다 (→ D-25).
+  **출처 검증이 선행 과제**: korail2 공개 API에 역 목록이 없다(Phase 0 감사) → 공공데이터포털 등 외부 소스
+- 선분 투영 구간 판정 (GPS 보정)
 - ✅ 완료 기준: 실제 열차번호로 매트릭스 조회 성공
 
 ### Phase 3 — 알림 + 자동화
@@ -737,6 +790,15 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - 좌석 점유 이력 저장 → "이 시간대 이 열차는 어느 호차가 잘 빈다" 통계
 - **실사용 몇 주 후 조정 예정 항목** (설정값으로 격리해둔 손잡이들, → D-17):
   추천 랭킹 가중치 / `min_extension_segments` / `SEATS_AVAILABLE` 다이제스트 상세도
+- **관리자 복구 수단** (→ D-24 후속). 가입이 잠긴 채 관리자 계정을 잃거나 첫 계정이
+  엉뚱하게 점유되면 **앱에서 풀 방법이 없다** — 로그인도 가입(403)도 막히고 DB 직접 수정만 남는다.
+  Phase 1 개발 중 실제로 겪었다(브라우저 검증용 계정이 첫 계정=관리자 자리를 차지).
+  후보 2개:
+  - **CLI 한 줄** (예: `uv run python -m app.storage.admin_reset <email>`) — **권장**.
+    Tailscale 격리 + 서버 접근 자체가 이미 권한이라 별도 시크릿이 필요 없고, 상시 열린 구멍이 안 남는다
+  - env `ADMIN_BOOTSTRAP_EMAIL` — 부팅 시 해당 계정을 관리자로 승격(없으면 무동작).
+    간단하지만 재배포가 필요하고, 켜둔 채 잊으면 그 자체가 백도어다
+  Phase 1~3에서는 **DB 파일 삭제/수정으로 대응한다** (1인용이고 데이터가 하루치라 비용이 낮다)
 
 ## 12. 배포 상세 (AWS EC2)
 
@@ -757,7 +819,8 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - [ ] **탄력적 IP 붙이지 말 것** — Tailscale 주소로 접근하므로 불필요하고 미사용 시 과금
 - [ ] `restart: unless-stopped`로 재부팅 자동 복구
 - [ ] SQLite 파일 볼륨 마운트. **계정·자격증명이 들어가므로 백업 파일 취급 주의**
-- [ ] `.env`: `SECRET_KEY`(Fernet), 세션 시크릿, VAPID 키쌍, `ALLOW_SIGNUP`
+- [ ] `.env`: `SECRET_KEY`(Fernet), 세션 시크릿, VAPID 키쌍
+      (가입 허용은 env가 아니라 DB — 관리자가 앱에서 토글한다 → D-24)
       (디스코드 웹훅은 env가 아니라 **DB의 user 행**에 저장됨 — 사용자별 설정이므로)
 - [ ] `.gitignore`에 `.env`, `*.db` 확인
 
@@ -859,11 +922,13 @@ itx-seat-matrix/
 
 ## 16. Claude Code 시작 프롬프트
 
+### Phase 1 (완료)
+
 ```
 PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐다고 가정 — 결과는 0절 참고)
 - Python 3.12, FastAPI, Pydantic v2, uv
 - 폴더 구조는 PLAN.md 15절 준수
-- User 모델 + 세션 쿠키 로그인부터 (argon2, ALLOW_SIGNUP 플래그)
+- User 모델 + 세션 쿠키 로그인부터 (argon2, 로그인 유지 D-23, 가입 잠금은 관리자 토글 D-24)
   모든 도메인 테이블에 user_id FK를 처음부터 포함
 - subscription은 status(STANDING/SEATED) + last_cells_snapshot 포함,
   PATCH /api/subscriptions/{id}로 상태 전이 (SEATED인데 좌석 없으면 422)
@@ -879,6 +944,60 @@ PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐�
 - 프론트는 seat-matrix.jsx를 web/ Vite 프로젝트로 옮기고 목업 상수를 API 호출로 대체
   + 로그인 화면 + 좌석 행 선택 → "이 자리에 앉음" / "일어남" 상태 전이 UI
 - 코레일 연동과 알림 발송은 이 단계에서 하지 않는다 (Phase 2, 3)
+```
+
+### Phase 2 — 코레일 실연동 *(다음 세션에서 이 블록을 그대로 붙여넣는다)*
+
+```
+PLAN.md 11절 Phase 2(코레일 실연동)를 시작한다.
+Phase 1은 완료됐다 — 이슈 #3, 브랜치 feat/phase1-skeleton, pytest 104 통과,
+Mock 어댑터로 로그인→열차 선택→매트릭스→"이 자리에 앉음" 전이까지 관통 확인됨.
+
+착수 전:
+1. Phase 1 PR이 dev에 머지됐는지 확인해라. 안 됐으면 알려줘 — 머지는 내가 한다.
+2. feature 템플릿으로 새 이슈를 발급하고 dev에서 feat/<이름>으로 분기해라. 커밋만 하고 push는 내가 한다.
+
+착수 순서 (앞이 뒤의 전제다):
+A. **get_stops 소스 확정이 최우선.** Phase 0 항목 5 = NO(열차번호 → 전체 정차역 파생 불가)가
+   여전히 미해결이다. 원칙 1(역 하드코딩 금지)의 전제이므로 여기가 막히면 뒤가 다 막힌다.
+   외부 소스(공공데이터포털 열차 정차역 API 등) 후보를 조사해 제시하고,
+   **내 승인 없이 특정 소스로 구현하지 마라.** D-25의 역 마스터(목록·좌표)와 같은 뿌리 문제이니 함께 푼다.
+B. Korail2Adapter (D-22). korail2 본체는 PyPI 정식 릴리스(korail2>=0.4.0)로 의존하고,
+   DynaPath 우회(x-dynapath-m-token 생성 + 헤더 부착)만 adapters/에 **벤더링**한다.
+   원본 = github.com/dhfhfk/korail2 브랜치 bypassDynapath,
+   고정 커밋 4b134266fff097ea0fd54e9f760cb128b6c8f878 (공급망 리뷰 완료된 커밋).
+   korail2는 **동기** 라이브러리다 — 어댑터 내부에서 asyncio.to_thread로 감싼다 (절대규칙 3).
+   세션은 프로세스 내 캐시, **만료 감지 시에만** 재로그인.
+C. 자격증명 저장: PUT /api/me/korail (Fernet, env SECRET_KEY). API 응답에 절대 노출 금지.
+   GET /api/me의 korail_linked가 이미 이 컬럼을 읽는다.
+D. 조회 예절: Semaphore(3)+지터는 adapters/seatmap_fetcher.py에 이미 있다.
+   여기에 재시도(30초×3)와 60초 TTL 캐시를 추가한다 — matrix_cache 테이블 신설,
+   키는 (train_no, date, frm, to), **화면 트래픽 전용이고 스케줄러는 우회**한다 (D-17).
+E. 좌석맵 정규화(열차종별 차이 흡수). 병합은 단순 조인이 맞다 — Phase 0 항목 6 실측 확정.
+   domain/matrix.py의 유니버스 합집합 규칙은 방어용으로 그대로 둔다.
+F. DelayPort 실구현 (D-12). h_expct_dlay_hr는 **6자리 포맷**이다(4자리 hhmm 아님, Phase 0 실측).
+   실패해도 지연 0으로 계속 동작해야 한다.
+G. station 테이블 적재 → ① domain/geo.py 선분 투영 + /matrix의 lat/lng, position_source="gps"
+   ② GET /api/stations의 소스를 Mock에서 station 테이블로 교체 (D-25).
+   GPS 신선도 안전장치(30초 초과·정확도 과대 시 무시)도 함께 (D-21).
+
+지킬 것:
+- **실 코레일 API를 루프로 때리지 마라.** 개발·디버깅은 ADAPTER=mock으로 한다 (CLAUDE.md 10).
+  실 호출은 필요한 최소 횟수만, 무엇을 왜 호출하는지 먼저 말하고 해라.
+- 실 자격증명·우회 코드를 건드리는 스크립트는 **네가 실행하지 말고 명령을 알려줘라.** 내가 직접 돌린다.
+- **개발 DB(data/itx.db)를 삭제·초기화하지 마라.** 내 계정이 들어 있고 가입이 잠겨 있어 복구가 번거롭다.
+  브라우저 검증이 필요하면 DB_PATH를 임시 경로로 지정해 별도 인스턴스로 띄워라.
+- 시크릿은 .env에만. 추적되는 파일(.env.example 포함)에 실제 값을 절대 쓰지 마라.
+- Phase 3 영역(NotifierPort/웹푸시/디스코드/APScheduler 폴링/PWA service worker)은 아직 만들지 않는다.
+- PLAN.md와 충돌하거나 문서가 침묵하는 지점을 만나면 멈추고 보고해라. 합의된 변경은 본문 수정 + D-항목.
+
+열린 항목 (Phase 1에서 보고했으나 문서 미반영):
+- 5절 estimate_seg 표기 `arrival(stops[i]) <= now + 지연보정`이 9절 "실효 도착 = 시각표 + 지연"과
+  **부호가 반대**다. 구현은 물리적으로 맞는 9절 정의를 따랐다(app/domain/timeline.py 주석 참고).
+  5절 문구 수정 + D-항목이 필요하다 — 지연 보정을 실제로 켜는 Phase 2에서 정리하자.
+
+완료 기준: ADAPTER=korail2로 **실제 열차번호 매트릭스 조회 성공**, ADAPTER=mock 폴백 유지,
+pytest 전부 통과(어댑터는 스모크 수준으로 충분).
 ```
 
 ---
@@ -997,6 +1116,7 @@ PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐�
 - **왜 소셜 로그인이 아닌가**: OAuth 콜백·리디렉트 설정이 Tailscale 내부망과 궁합이 나쁘고,
   1인용에 얻는 게 없음
 - **가입은 잠근다**: `ALLOW_SIGNUP` 플래그로 부트스트랩 1회만 허용 후 `false`.
+  *(v8에서 개정 — 잠금을 env가 아니라 DB의 관리자 토글로 옮김 → D-24. 기본 잠김은 유지)*
   공개 노출을 안 하더라도 **열어둘 이유가 없는 엔드포인트는 닫는다**
 - **부수 효과 (의도치 않게 좋았던 점)**:
   코레일 자격증명이 `.env`에서 **DB의 user 행 + Fernet 암호화**로 이동하면서,
@@ -1244,3 +1364,60 @@ PLAN.md를 읽고 Phase 1을 구현해줘. (Phase 0 검증은 이미 완료됐�
 - **근거**: 항목 3(순수성)이 최우선 게이트였고, 이게 YES로 확정된 이상 나머지는 트레이드오프
   판단의 문제였다. 개인용 도구에서 "서비스가 자동화를 거부하는 신호"의 무게는 공개 서비스와
   다르게 본다 — 이 프로젝트는 처음부터 앱스토어 배포·공개 노출이 없다(2절 비목표, D-1).
+### D-23. 로그인 유지 체크박스 — 세션 수명 이원화 *(v8, Phase 1 구현 중)*
+- **문제**: v7까지 세션은 무조건 30일 지속 쿠키였다. 내 폰에서는 그게 맞지만,
+  공용 PC나 잠깐 빌린 기기에서 한 번 로그인하면 **30일짜리 자격증명이 그 기기에 남는다.**
+  Tailscale 내부망이라 노출면이 좁을 뿐, 세션 토큰 자체의 수명은 그대로다
+- **결정**: 로그인 폼에 "로그인 유지" 체크박스를 두고 **쿠키와 서버 세션을 함께** 가른다
+  - on: `Max-Age` 30일 쿠키 + 서버 세션 30일
+  - off(기본): `Max-Age` 없는 브라우저 세션 쿠키 + 서버 세션 **12시간**
+- **왜 쿠키만 바꾸지 않는가**: 쿠키만 세션 쿠키로 바꾸면 브라우저에서는 사라져도
+  **서버 세션 행은 30일 살아 있다.** 그사이 유출된 토큰은 그대로 유효하므로 반쪽짜리다
+- **`session.persistent` 컬럼을 두는 이유**: 슬라이딩 연장 때 어느 수명으로 늘릴지
+  알아야 한다. 없으면 임시 세션이 접속할 때마다 30일로 승격돼 규칙이 무의미해진다
+- **기본값을 해제로 둔 이유**: 보안 기본값은 안전한 쪽. 매일 쓰는 홈화면 앱에서는
+  한 번 체크하면 그만이다
+- **재검토 조건**: 홈화면 PWA에서 체크했는데도 세션이 자주 끊기면 수명·슬라이딩 정책 재조정
+
+### D-24. 가입 잠금: env `ALLOW_SIGNUP` → **관리자 토글** *(v8, D-10 개정)*
+- **문제**: D-10의 잠금은 "첫 계정 만들고 env를 false로 되돌린다"였다.
+  잠금 주체가 **배포 아티팩트**라, 지인에게 계정 하나 열어주려면 env를 고치고
+  컨테이너를 재시작해야 한다. 열어둔 뒤 되돌리는 걸 잊으면 그대로 열린 채 남는다
+- **결정**:
+  1. 가입 허용 여부를 **DB**(`app_setting.signup_enabled`, 기본 false)로 옮긴다
+  2. **첫 계정은 부트스트랩으로 항상 허용**(사용자 0명일 때)하고, 그 계정이 **관리자**가 된다
+  3. 관리자만 `GET/PATCH /api/admin/settings`로 토글한다. env `ALLOW_SIGNUP`은 삭제
+- **D-10과의 관계**: "열어둘 이유가 없는 엔드포인트는 닫는다"는 **그대로 유지**된다.
+  바뀐 것은 잠금의 **위치**(배포 아티팩트 → DB)와 **주체**(재배포 → 관리자)뿐이고,
+  기본값이 잠김이라는 점도 같다. 오히려 켠 뒤 끄는 비용이 없어져 실제로 더 자주 닫히게 된다
+- **관리자 승격 API를 만들지 않는 이유**: 1~2인용에서 권한 관리 화면은 과하다.
+  관리자는 첫 계정 자동 부여뿐이고, 바꿀 일이 생기면 DB에서 직접 고친다
+- **비목표와의 경계**: 2절의 "회원가입 개방"은 여전히 비목표다. 이 토글은
+  **닫힌 상태를 기본으로 두고 필요할 때만 잠깐 여는** 장치이지 공개 가입이 아니다
+- **미해결로 남긴 것 (v9 추가)**: 잠긴 상태에서 관리자 계정을 잃으면 앱 안에 탈출구가 없다.
+  복구 수단(CLI 승격 등)은 **Phase 4 항목으로 이월**한다 — 11절 Phase 4 참고.
+  그때까지는 DB 파일 직접 수정으로 대응한다
+
+### D-25. 열차 선택 UX: 역 드롭다운 + 시각 하한 검색 *(v9, Phase 1 구현 중)*
+- **문제**: Phase 1의 탑승 등록 화면은 열차번호·역 이름을 **텍스트로 입력**받았다.
+  목업 관통이 목적이라 최소로 만든 것인데, 실사용에서는 성립하지 않는다:
+  - 사용자는 정식 역명을 모른다(`서울`인지 `서울역`인지). **오타가 곧 404**다
+  - 열차번호를 외워서 다니지 않는다. 통근에서 고르는 것은 "몇 시 차"가 아니라
+    **"퇴근하고 탈 수 있는 차"** 다 — 검색의 입력은 시각 **하한**이어야 한다
+- **이미 있던 것 / 없던 것**: 7절의 `GET /api/trains/search?...&time=`과
+  10절의 "열차 선택 화면"은 v5부터 있었다. 없던 것은 **역 목록의 출처**다 —
+  `station` 테이블이 "GPS 보정용"으로만 규정돼 있어 드롭다운 소스가 계획에 없었다
+- **결정**:
+  1. `station` 테이블의 **용도를 2개로 명시**한다: GPS 보정 좌표(D-13) + **역 선택 드롭다운 소스**
+  2. `GET /api/stations` 신설. `KorailPort`에 `list_stations()`를 추가해
+     Phase 1은 Mock 노선을, Phase 2는 station 테이블을 소스로 쓴다
+  3. `search_trains`에 시각 하한(`time`)을 실제로 구현한다 (스펙에만 있고 구현이 비어 있었다)
+  4. **UI 골격은 Phase 1에서 만든다** — Mock 어댑터가 시각대가 다른 열차 여러 편을 주도록 넓혀
+     역 드롭다운 → 시각 하한 검색 → 열차 선택 흐름을 눈으로 확정하고,
+     Phase 2에서는 **데이터 소스만** 갈아끼운다
+- **Phase 2의 선행 과제로 남는 것**: 역 마스터 데이터의 출처. Phase 0 라이브러리 감사에서
+  korail2 공개 메서드에 역 목록이 없음을 확인했다(`login/logout/search_train/
+  search_train_allday/reserve/tickets/reservations/cancel`). 항목 5(열차번호 → 전체 정차역
+  파생 불가)와 **같은 뿌리의 문제**이며, 공공데이터포털 등 외부 소스 검증이 필요하다
+- **원칙 1과의 관계**: 역 이름을 드롭다운으로 고르게 하는 것은 하드코딩이 아니다.
+  목록은 여전히 **데이터에서 온다**. 도메인 로직은 지금도 "수원"이라는 단어를 모른다
