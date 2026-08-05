@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.domain.matrix import effective_start_idx
 from app.domain.models import (
     SeatMatrix,
     SeatRecommendation,
@@ -112,8 +113,6 @@ def build_verdict(
 
     실효 시작 = `max(current_seg_idx, board_idx)`. 인덱스는 전부 전체 노선 기준.
     """
-    from app.domain.matrix import effective_start_idx  # 순환 없음: matrix는 verdict를 모른다
-
     start_idx = min(effective_start_idx(current_seg_idx, board_idx), alight_idx - 1)
     stops = matrix.stops
     enriched = enrich_seats(matrix.seats, start_idx, alight_idx)
