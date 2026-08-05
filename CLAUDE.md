@@ -82,3 +82,31 @@ api/ ──> domain/ (순수 함수) <── scheduler/
 - `seat-matrix.jsx` — 매트릭스 화면 프로토타입이자 verdict 규칙의 참조 구현.
   `/matrix` 응답 스키마(7절)와 1:1
 - `scripts/phase0_feasibility.py` — Phase 0 검증 (일회성, app/ 코드와 무관)
+
+## Git 규칙 (이슈 기반 워크플로우)
+
+모든 기능 개발·버그 수정은 **이슈 발급 → 브랜치 분기 → 작은 단위 커밋/푸시 → PR** 순서로 진행한다.
+분기/머지 대상은 항상 **`dev` 브랜치** (main 아님).
+
+1. **이슈 먼저 발급 (필수).** 작업 착수 전 `.github/ISSUE_TEMPLATE/`의 템플릿으로 GitHub 이슈를 만든다.
+   - 기능 개발 → `Feature`(feature.md) / 외부 요청 작업 → `Feature request`(feature_request.md)
+   - 버그 수정 → `Bug`(bug.md) / 질문 → `Question`(question.md)
+   - 템플릿의 상세·체크리스트 항목을 채운다. 발급된 **이슈 번호**를 이후 브랜치·커밋·PR에 사용한다.
+   - 예: `gh issue create --template feature.md` (gh 인증 필요) 또는 GitHub 웹의 이슈 템플릿.
+
+2. **브랜치.** `dev`에서 이슈 단위로 `feat/<기능이름>` 브랜치를 분기해 작업한다.
+   - `git switch backend && git pull --rebase origin backend` 후 `git switch -c feat/<기능이름>`.
+
+3. **커밋.** 작은 작업 단위마다 `[#이슈번호] 커밋 메시지` 형태로 커밋만 진행한다. push는 사용자가 검토 후 직접 하도록할것.
+   - 예: `[#12] A-01 활동 분석 서비스 추가`. 한 커밋 = 한 논리 단위, 큰 덩어리로 몰아 커밋하지 말 것.
+
+4. **PR.** 이슈 단위 작업이 모두 끝나면 `.github/PullRequestTemplate.md` 템플릿으로 PR을 생성한다.
+   - 제목 `[#이슈번호] 작업내용`, base 브랜치 **`dev`**.
+   - 본문의 `Closes #<이슈번호>`를 채워 머지 시 이슈가 자동으로 닫히게 한다.
+   - 예: `gh pr create --base dev --title "[#1] 이슈이름" --body-file .github/PullRequestTemplate.md`.
+
+5. **품질 게이트.** PR 올리기 전 빌드 여부 테스트 필수. `dev` 브랜치는 항상 컴파일되는 상태를 유지한다.
+
+6. `dev -> main` 머지는 phase가 넘어갈 때 사용자에게 제안 하고 사용자가 직접 merge.가
+
+## 보안상 위험성이 높은 민감 정보들은 .env로 관리하고 반드시 gitignore 처리
