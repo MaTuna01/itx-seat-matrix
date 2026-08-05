@@ -1,0 +1,229 @@
+"""API 스모크 — 인증 경계 + PATCH 상태 전이 422 (PLAN 13절).
+
+`api/`는 원칙적으로 생략 가능한 영역이지만, 13절이 명시한 두 가지는 확인한다:
+① 인증(401) ② PATCH 상태 전이 검증(422).
+여기에 절대규칙 5(화면 조회가 알림 상태를 건드리지 않는다)를 함께 잠근다.
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+import pytest
+
+from app.config import get_settings
+from app.storage.db import connect, db_path
+
+# 목업 열차는 운행일 08:00~08:56에 달린다. 내일 날짜를 쓰면 "운행 전"이 확정돼
+# 현재 구간이 시계와 무관하게 0이 된다 (테스트 결정성)
+RIDE_DATE = (date.today() + timedelta(days=1)).isoformat()
+
+
+def make_subscription(client, **overrides) -> dict:
+    payload = {
+        "train_no": "1004",
+        "date": RIDE_DATE,
+        "board_at": "천안",
+        "alight_at": "서울",
+        "status": "STANDING",
+    }
+    payload.update(overrides)
+    res = client.post("/api/subscriptions", json=payload)
+    assert res.status_code == 201, res.text
+    return res.json()
+
+
+class TestAuth:
+    def test_인증_없이는_401(self, anon_client):
+        assert anon_client.get("/api/me").status_code == 401
+        assert anon_client.get("/api/subscriptions").status_code == 401
+
+    def test_로그인하면_내_정보를_돌려준다(self, client):
+        res = client.get("/api/me")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["email"] == "me@example.com"
+        assert body["korail_linked"] is False
+        # 자격증명·웹훅은 응답에 절대 나오지 않는다 (절대규칙 9)
+        assert "korail_pw_enc" not in body and "discord_webhook_enc" not in body
+
+    def test_잘못된_비밀번호는_401(self, client):
+        res = client.post(
+            "/api/auth/login", json={"email": "me@example.com", "password": "wrong-password"}
+        )
+        assert res.status_code == 401
+
+    def test_로그아웃하면_세션이_죽는다(self, client):
+        assert client.post("/api/auth/logout").status_code == 204
+        assert client.get("/api/me").status_code == 401
+
+    def test_가입이_잠겨있으면_403(self, anon_client, monkeypatch):
+        monkeypatch.setenv("ALLOW_SIGNUP", "false")
+        get_settings.cache_clear()
+        res = anon_client.post(
+            "/api/auth/signup",
+            json={"email": "x@example.com", "password": "12345678", "display_name": "x"},
+        )
+        assert res.status_code == 403
+
+
+class TestSubscriptionTransition:
+    def test_SEATED_인데_좌석이_없으면_422(self, client):
+        res = client.post(
+            "/api/subscriptions",
+            json={
+                "train_no": "1004", "date": RIDE_DATE, "board_at": "천안",
+                "alight_at": "서울", "status": "SEATED",
+            },
+        )
+        assert res.status_code == 422
+
+    def test_구독_생성시_첫_폴_포인트를_기록한다(self, client):
+        sub = make_subscription(client)
+        # 천안 08:00 - 10분 (D-19 재시작 내구성 포인터)
+        assert sub["next_poll_at"].startswith(f"{RIDE_DATE}T07:50:00")
+
+    def test_앉음_전이(self, client):
+        sub = make_subscription(client)
+        res = client.patch(
+            f"/api/subscriptions/{sub['id']}",
+            json={"status": "SEATED", "my_car": 4, "my_seat_no": "1B"},
+        )
+        assert res.status_code == 200
+        assert res.json()["status"] == "SEATED"
+        assert (res.json()["my_car"], res.json()["my_seat_no"]) == (4, "1B")
+
+    def test_자리_이동_전이는_스냅샷을_무효화한다(self, client):
+        sub = make_subscription(client, status="SEATED", my_car=3, my_seat_no="7A")
+        with connect(db_path()) as conn:
+            conn.execute(
+                "UPDATE subscription SET last_cells_snapshot = ?, last_verdict_hash = ?"
+                " WHERE id = ?",
+                ("[true, false]", "old-hash", sub["id"]),
+            )
+        client.patch(f"/api/subscriptions/{sub['id']}", json={"my_car": 4, "my_seat_no": "1B"})
+        with connect(db_path()) as conn:
+            row = conn.execute(
+                "SELECT last_cells_snapshot, last_verdict_hash FROM subscription WHERE id = ?",
+                (sub["id"],),
+            ).fetchone()
+        assert row["last_cells_snapshot"] is None  # D-16
+        assert row["last_verdict_hash"] == "old-hash"  # 베이스라인 재발송 방지 (D-20)
+
+    def test_일어남_전이는_좌석을_비운다(self, client):
+        sub = make_subscription(client, status="SEATED", my_car=3, my_seat_no="7A")
+        res = client.patch(f"/api/subscriptions/{sub['id']}", json={"status": "STANDING"})
+        assert res.status_code == 200
+        assert res.json()["my_car"] is None and res.json()["my_seat_no"] is None
+
+    def test_SEATED로_바꾸면서_좌석을_안_주면_422(self, client):
+        sub = make_subscription(client)
+        res = client.patch(f"/api/subscriptions/{sub['id']}", json={"status": "SEATED"})
+        assert res.status_code == 422
+
+    def test_남의_구독은_보이지_않는다(self, client, anon_client):
+        sub = make_subscription(client)
+        anon_client.post(
+            "/api/auth/signup",
+            json={"email": "other@example.com", "password": "commute-1234", "display_name": "남"},
+        )
+        assert anon_client.patch(
+            f"/api/subscriptions/{sub['id']}", json={"status": "STANDING"}
+        ).status_code == 404
+
+    def test_삭제하면_비활성화된다(self, client):
+        sub = make_subscription(client)
+        assert client.delete(f"/api/subscriptions/{sub['id']}").status_code == 204
+        assert client.get("/api/subscriptions").json() == []
+
+
+class TestMatrix:
+    def test_응답_스키마는_PLAN_7절과_같다(self, client):
+        res = client.get(
+            f"/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울", "my_seat": "3-7A"},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["stops"] == ["천안", "평택", "수원", "안양", "영등포", "서울"]
+        assert body["current_seg_idx"] == 0
+        assert body["position_source"] == "schedule"  # GPS 보정은 Phase 2
+        assert len(body["seats"]) == 18
+        assert body["sub_status"] == "SEATED"
+        verdict = body["verdict"]
+        assert verdict["my_seat_status"] == "SOLD_FROM"  # 목업 3-7A는 [T,T,T,F,F]
+        assert verdict["my_seat_sold_from"] == "천안"
+        # SEATED는 동률이면 내 호차(3호차) 근접순 → 4-1B보다 3-8B가 먼저다
+        assert verdict["move_to"][0] == {
+            "car": 3, "seat_no": "8B", "clear_until_idx": 5, "clear_all": True,
+        }
+        # 하차역까지 비는 좌석은 이 둘뿐이다 (clear_all 좌석이 있으면 그것만 추천)
+        assert [f"{r['car']}-{r['seat_no']}" for r in verdict["move_to"]] == ["3-8B", "4-1B"]
+        assert body["next_poll"] == {"station": "천안", "offset_min": 10}
+
+    def test_좌석_미지정이면_입석_관점_판정(self, client):
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        body = res.json()
+        assert body["sub_status"] == "STANDING"
+        assert body["verdict"]["my_seat_status"] is None
+
+    def test_노선에_없는_역은_404(self, client):
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "부산", "alight_at": "서울"},
+        )
+        assert res.status_code == 404
+
+    def test_잘못된_좌석_형식은_422(self, client):
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울", "my_seat": "7A"},
+        )
+        assert res.status_code == 422
+
+    def test_화면_조회는_알림_상태를_건드리지_않는다(self, client):
+        """절대규칙 5 / D-13·D-17 — 기록은 스케줄러만 한다."""
+        sub = make_subscription(client, status="SEATED", my_car=3, my_seat_no="7A")
+        client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울", "my_seat": "3-7A"},
+        )
+        with connect(db_path()) as conn:
+            row = conn.execute(
+                "SELECT last_verdict_hash, last_cells_snapshot, last_notified_at"
+                " FROM subscription WHERE id = ?",
+                (sub["id"],),
+            ).fetchone()
+        assert row["last_verdict_hash"] is None
+        assert row["last_cells_snapshot"] is None
+        assert row["last_notified_at"] is None
+
+
+def test_프리셋은_사용자별로_보인다(client, anon_client):
+    res = client.post(
+        "/api/presets",
+        json={
+            "name": "출근", "from_station": "천안", "to_station": "서울",
+            "usual_train_nos": ["1004"],
+        },
+    )
+    assert res.status_code == 201
+    assert res.json()["poll_offsets_min"] == [10, 4]
+    assert len(client.get("/api/presets").json()) == 1
+
+    anon_client.post(
+        "/api/auth/signup",
+        json={"email": "other@example.com", "password": "commute-1234", "display_name": "남"},
+    )
+    assert anon_client.get("/api/presets").json() == []
+
+
+def test_열차_검색(client):
+    res = client.get(
+        "/api/trains/search", params={"date": RIDE_DATE, "from": "천안", "to": "서울"}
+    )
+    assert res.status_code == 200
+    assert res.json()[0]["train_no"] == "1004"
