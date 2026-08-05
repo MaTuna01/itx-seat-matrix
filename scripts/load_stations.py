@@ -65,7 +65,10 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "code": ("역코드", "stationcode", "stncd", "코드", "역번호", "stationid"),
     "lat": ("위도", "latitude", "lat", "y좌표", "ycoord"),
     "lng": ("경도", "longitude", "lng", "lon", "x좌표", "xcoord"),
-    "line": ("주운행선명", "선명", "노선명", "line", "linename", "mrntnm", "지역본부"),
+    # `지역본부`(서울본부 등)는 **노선이 아니다** — 여기에 넣으면 안 된다.
+    # upsert의 COALESCE가 먼저 온 값을 지키므로, 지역본부가 line을 차지하면
+    # 나중에 시각표의 실제 주운행선명(경부선)이 영영 들어오지 못한다.
+    "line": ("주운행선명", "선명", "노선명", "line", "linename", "mrntnm"),
 }
 
 
