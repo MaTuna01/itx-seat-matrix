@@ -3,7 +3,7 @@
 # **배포는 하지 않는다.** 이미지를 레지스트리에 밀지 않고 러너를 tailnet에 붙이지도
 # 않는다 (CD는 #22). 여기서 하는 일은 "손으로 겪은 실패를 자동으로 다시 겪지 않기"다:
 #
-#   test     테스트 355개가 로컬에서만 돌고 있었다
+#   test     테스트가 로컬에서만 돌고 있었다 (Phase 3 종료 시점에 355개)
 #   build    Phase 4 중 Docker Desktop이 꺼져 있어 Dockerfile 미검증 구간이 길었고
 #            결국 M4의 첫 빌드가 첫 실행이 됐다. 저장소가 public이라 `ubuntu-24.04-arm`
 #            러너가 무료다 → **QEMU 없이 네이티브 arm64로** 검증한다 (t4g.nano=Graviton)
@@ -42,7 +42,7 @@ jobs:
       # 런타임과 같은 3.12로 못 박는다 — 러너가 기본 파이썬을 올려도 조용히 따라가지 않는다
       UV_PYTHON: "3.12"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: uv 설치
         uses: astral-sh/setup-uv@v5
@@ -66,7 +66,7 @@ jobs:
     # 무엇보다 **실제로 배포하는 아키텍처가 아니게 된다**
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
@@ -140,7 +140,7 @@ jobs:
     name: 시크릿 검사
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 훅과 **같은 규칙**을 돈다 (scripts/secret_scan.py). 의존성이 없어 uv가 필요없다.
       #
