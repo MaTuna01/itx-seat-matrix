@@ -14,9 +14,13 @@
 
 | 머신 | 역할 | 이유 |
 |---|---|---|
-| **M4 MacBook Air** (arm64) | **이미지 빌드** | t4g는 Graviton(arm64). Apple Silicon에서 빌드하면 네이티브 arm64가 나온다 |
-| **Intel iMac** (x86_64) | **`.env`·DB 원본 제공** | 실 `SECRET_KEY`/VAPID/코레일 자격증명과 `data/itx.db`가 여기 있다 |
+| **M4 MacBook Air** (arm64) | **작업 거점 — 빌드와 나머지 전부** | t4g는 Graviton(arm64). Apple Silicon에서 빌드하면 네이티브 arm64가 나온다 |
+| **Intel iMac** (x86_64) | **`data/itx.db` 원본 제공 — 이것만** | 실 코레일 자격증명과 푸시 기기 등록이 이 DB에만 있다 |
 | **EC2 t4g.nano** | 실행 | 24시간 깨어 있어야 30초 틱이 멈추지 않는다 (Phase 3이 열린 채로 남은 이유) |
+
+**아이맥에서 사람이 해야 하는 일은 "서버를 내리는 것" 하나뿐이다.** DB는 M4에서 ssh 한 줄로
+뽑아온다(5절). `.env`는 아이맥에서 긁어오지 않고 **별도 보관본(노션 등)에서 손으로 만든다**(4절) —
+대신 `SECRET_KEY` 지문을 대조해야 한다. 저장소는 M4에서 새로 clone한다.
 
 > **Intel iMac에서 배포 이미지를 빌드하지 마라.** `--platform linux/arm64`를 빠뜨리면 x86
 > 이미지가 나와 EC2에서 `exec format error`로 죽고(12절이 경고하는 함정), 붙여도 QEMU
@@ -167,14 +171,23 @@ ssh ec2-user@itx     # M4에서. 키 파일 없이 붙어야 한다
 | `KORAIL_ID` / `KORAIL_PW` | **옮기지 않는다** | `scripts/phase0_feasibility.py` 전용 잔재다. `config.Settings`에 필드조차 없어 앱은 읽지 않는다. 코레일 계정은 **DB의 user 행**에 Fernet 암호로 있다 (D-35) |
 | `KORAIL_SUB_ID` / `KORAIL_SUB_PW` | 옮기지 않는다 | 같은 이유 (미보유·미검증, D-22) |
 
-**iMac에서** 필요한 키만 뽑아 만든다:
+### M4에서 만든다 — 시크릿은 별도 보관본(노션 등)에서 손으로
+
+아이맥의 `.env`를 긁어올 필요는 없다. 시크릿을 노션 같은 곳에 보관해 뒀다면 거기서 옮긴다.
+**단 손으로 옮기는 순간 오타 위험이 생기므로 지문 대조가 필수다** (바로 아래).
 
 ```bash
+# M4. 저장소를 clone 한 디렉터리에서
 cd ~/itx-seat-matrix
 
-# 1) 그대로 옮길 시크릿만 추출 (KORAIL_* 는 의도적으로 제외한다)
-grep -E '^(SECRET_KEY|VAPID_PUBLIC_KEY|VAPID_PRIVATE_KEY|VAPID_SUBJECT|DATA_GO_KR_SERVICE_KEY)=' \
-  .env > ~/itx-prod.env
+# 1) 보관본에서 시크릿 5개를 붙여 넣는다 (KORAIL_* 는 넣지 않는다)
+cat > ~/itx-prod.env <<'EOF'
+SECRET_KEY=<노션에서>
+VAPID_PUBLIC_KEY=<노션에서>
+VAPID_PRIVATE_KEY=<노션에서>
+VAPID_SUBJECT=<노션에서>
+DATA_GO_KR_SERVICE_KEY=<노션에서>
+EOF
 
 # 2) 배포용 값 추가
 cat >> ~/itx-prod.env <<'EOF'
@@ -187,19 +200,48 @@ SCHEDULER_ENABLED=true
 SCHEDULER_INTERVAL_SECONDS=30
 LOG_LEVEL=INFO
 EOF
+```
 
-# 3) 눈으로 확인 — KORAIL_ID/PW 가 없어야 하고 SECRET_KEY/VAPID 는 값이 있어야 한다
-grep -c . ~/itx-prod.env && grep -o '^[A-Z_]*' ~/itx-prod.env
+> `<<'EOF'`의 따옴표를 지우지 마라. 없으면 셸이 값 안의 `$`를 변수로 확장해
+> **키가 조용히 잘린다.** base64 키에 `$`가 드물지만 없다고 보장할 수 없다.
 
-# 4) 전송하고 원본 흔적을 지운다
+### ★ 지문 대조 — 이걸 건너뛰면 D-35를 다시 만난다
+
+`SECRET_KEY`가 **바이트 단위로** 원본과 같아야 한다. 한 글자라도 다르면 — 앞뒤 공백,
+노션이 바꿔치기하는 스마트 쿼트(`"`가 `"`·`"`로, `-`가 `–`로) — **앱은 정상 기동하고 로그인도
+되는데** 5절에서 옮겨온 DB의 `korail_pw_enc` 복호화만 실패한다. 증상은 `FETCH_FAILED` 1회와
+설정 화면의 "연결됨" 꺼짐뿐이라 원인이 `.env`에 있다는 걸 알아내기 어렵다.
+
+`scripts/env_fingerprint.sh`가 **값을 노출하지 않고** 12자 지문만 출력한다. 양쪽에서 돌린다:
+
+```bash
+# 원본 — 아이맥. ssh 로 붙어서 돌려도 된다 (출력에 값은 없다)
+ssh imac 'cd ~/itx-seat-matrix && scripts/env_fingerprint.sh'
+
+# 사본 — 방금 만든 배포용
+scripts/env_fingerprint.sh ~/itx-prod.env
+```
+
+**두 출력의 12자가 전부 일치해야 한다.** 하나라도 다르면 그 키를 다시 옮긴다.
+`(빈 값)`이 보이면 붙여넣기가 실패한 것이다. `KORAIL_*` 경고가 나오면 그 줄을 지운다.
+
+> 아이맥을 완전히 내리기 **전에** 대조해라. 내린 뒤에 지문이 다른 걸 발견하면
+> 원본을 다시 켜야 한다.
+
+### 전송
+
+```bash
+# M4 → EC2
 scp ~/itx-prod.env ec2-user@itx:~/itx-seat-matrix/.env
 rm -P ~/itx-prod.env     # macOS. Linux면 shred -u
 ```
 
-서버에서 권한을 좁힌다:
+서버에서 권한을 좁히고, 옮겨진 쪽에서도 한 번 더 대조한다 (`scp` 중 깨질 일은 없지만
+값이 있는지·`KORAIL_*`이 없는지 확인은 공짜다):
 
 ```bash
 chmod 600 ~/itx-seat-matrix/.env
+cd ~/itx-seat-matrix && scripts/env_fingerprint.sh
 ```
 
 ---
@@ -213,27 +255,49 @@ DB는 **WAL 모드**다 (`app/storage/db.py`가 `PRAGMA journal_mode = WAL`). �
 
 `.backup`을 쓴다. WAL을 포함해 일관된 단일 파일을 만들어 준다.
 
-**iMac에서:**
+### ① 아이맥 서버를 내린다 — 여기서 사람이 아이맥에 손대는 건 이것뿐
+
+**이 시점부터 EC2가 원본이 된다.** 백업을 뜬 뒤 아이맥에서 등록한 것(새 푸시 기기,
+자격증명 변경)은 EC2에 없고, 두 DB가 갈라진다. 그래서 먼저 내린다:
 
 ```bash
-cd ~/itx-seat-matrix
+# 아이맥. 포그라운드로 띄워뒀으면 Ctrl-C
+pgrep -fl 'uvicorn app.main'      # 남아 있으면 kill
+```
 
-# 개발 서버가 떠 있으면 먼저 멈춘다 (.backup은 라이브 DB도 되지만 확실한 편이 낫다)
-sqlite3 data/itx.db ".backup '/tmp/itx-migrate.db'"
+`.backup`은 라이브 DB에도 쓸 수 있지만, 내려두면 "백업 이후에 뭐가 더 들어갔나"를
+생각할 필요가 없어진다.
 
-# sqlite3 CLI가 없으면 파이썬으로 (동일한 온라인 백업 API를 쓴다)
-#   uv run python -c "import sqlite3; s=sqlite3.connect('data/itx.db'); d=sqlite3.connect('/tmp/itx-migrate.db'); s.backup(d); d.close(); s.close()"
+### ② M4에서 ssh로 뽑아온다 — 아이맥에 앉을 필요는 없다
 
-# 옮겨진 내용을 확인한다 — user/subscription/station/train_stop 이 다 있어야 한다
-sqlite3 /tmp/itx-migrate.db "select 'user',count(*) from user union all
+```bash
+# M4에서. sqlite3 는 macOS 기본 탑재다
+ssh imac 'cd ~/itx-seat-matrix && sqlite3 data/itx.db ".backup \"/tmp/itx-migrate.db\""'
+
+# sqlite3 CLI가 없거나 위 인용이 꼬이면 파이썬으로 (동일한 온라인 백업 API를 쓴다)
+#   ssh imac 'cd ~/itx-seat-matrix && uv run python -c "import sqlite3
+#   s=sqlite3.connect(\"data/itx.db\"); d=sqlite3.connect(\"/tmp/itx-migrate.db\")
+#   s.backup(d); d.close(); s.close()"'
+
+scp imac:/tmp/itx-migrate.db ~/itx-migrate.db
+ssh imac 'rm -P /tmp/itx-migrate.db'      # 원본 흔적을 남기지 않는다
+```
+
+### ③ 내용을 확인하고 EC2로 보낸다
+
+```bash
+# M4에서. user/subscription/station/train_stop/push_device 가 다 있어야 한다
+sqlite3 ~/itx-migrate.db "select 'user',count(*) from user union all
   select 'subscription',count(*) from subscription union all
   select 'station',count(*) from station union all
   select 'train_stop',count(*) from train_stop union all
   select 'push_device',count(*) from push_device;"
 
-scp /tmp/itx-migrate.db ec2-user@itx:~/itx-seat-matrix/data/itx.db
-rm -P /tmp/itx-migrate.db
+scp ~/itx-migrate.db ec2-user@itx:~/itx-seat-matrix/data/itx.db
 ```
+
+> `~/itx-migrate.db`는 **7·8절 검증이 끝날 때까지 지우지 마라** — 유일한 롤백이다.
+> 끝나면 지운다(`rm -P`). 코레일 자격증명이 든 파일이니 사본을 여기저기 흘리지 마라.
 
 **서버에서:**
 
@@ -313,23 +377,25 @@ M4·iMac 브라우저에서 `https://itx.tail9115e9.ts.net` → 로그인 화면
 - [ ] 역 드롭다운에 역이 나온다 → station 캐시가 왔다
 - [ ] 열차 검색 → 매트릭스가 그려진다 → `ADAPTER=korail2` + 정차역 캐시 정상
 
-### ★ 여기까지 왔으면 **아이맥 개발 서버를 멈춘다**
+### ★ 아이맥 서버가 여전히 내려가 있는지 확인한다
+
+5절 ①에서 내렸지만, 그 사이 재부팅했거나 습관적으로 다시 띄웠을 수 있다. 지금이
+**두 서버가 동시에 살아 있을 수 있는 유일한 구간**이므로 한 번 더 본다:
+
+```bash
+ssh imac "pgrep -fl 'uvicorn app.main'"     # 아무것도 안 나와야 한다
+```
 
 DB를 복사해 왔으므로 `push_device`·`subscription` 행이 **양쪽에 똑같이 있다.**
-아이맥 서버를 켜둔 채로 두면 스케줄러가 두 곳에서 각각 30초 틱을 돌려서:
+아이맥 서버가 실 어댑터로 살아 있으면 스케줄러가 두 곳에서 각각 30초 틱을 돌려서:
 
 - 같은 폰으로 **알림이 두 번 온다** (`--workers 1`은 한 호스트 안만 막는다 — D-17)
 - 코레일 조회가 두 배가 된다 (CLAUDE.md 10 위반)
 - 어느 쪽이 보낸 알림인지 구분이 안 돼 10절 검증 결과를 신뢰할 수 없다
 
-```bash
-# iMac 에서 — uvicorn 을 끈다 (개발할 때만 켠다)
-#   포그라운드로 띄워뒀으면 Ctrl-C. launchd/nohup 으로 돌려뒀으면 프로세스를 찾아 끈다
-pgrep -fl 'uvicorn app.main'
-```
-
-아이맥은 개발기로 계속 쓴다. 다만 **개발 서버를 켤 때는 `ADAPTER=mock`으로 띄워라** —
-실 어댑터로 띄우면 그 순간 위 3가지가 다시 발생한다.
+아이맥은 개발기로 계속 쓴다. 다만 **개발 서버는 `ADAPTER=mock`으로만 띄워라** —
+실 어댑터로 띄우면 그 순간 위 3가지가 다시 발생한다. (`~/Library/LaunchAgents`에 이 앱의
+plist는 없다 — 수동 실행이라 한 번 내리면 재부팅해도 되살아나지 않는다.)
 
 ---
 
@@ -517,5 +583,7 @@ docker compose logs app | grep "h_msg_cd"
   보안그룹 하나에만 의존하는 상태가 된다 (이중 방어, D-10)
 - **탄력적 IP를 붙이지 마라.** Tailscale 주소로 접근하므로 불필요하고 미사용 시 과금된다 (12절)
 - **`SECRET_KEY`·VAPID 키를 서버에서 새로 만들지 마라** (D-34, D-35)
+- **`.env`를 손으로 옮겼는데 지문 대조를 건너뛰지 마라.** `scripts/env_fingerprint.sh`를
+  원본·사본 양쪽에서 돌린다 (4절). 오타 하나가 "기동은 되는데 코레일만 안 되는" 상태를 만든다
 - **`.env`·`*.db`를 커밋하지 마라.** pre-commit 훅이 막지만(D-33) 훅을 믿고 방심하지 마라
 - **실 코레일 API를 루프로 때리지 마라.** 디버깅은 `ADAPTER=mock`으로 (CLAUDE.md 10)

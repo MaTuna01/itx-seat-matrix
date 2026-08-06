@@ -1034,6 +1034,7 @@ itx-seat-matrix/
 │   ├── gen_vapid.py          # VAPID 키페어 생성 (일회성, → D-34)
 │   ├── gen_icons.py          # PWA 아이콘 생성 (일회성)
 │   ├── deploy_check.sh       # 배포 상태 점검 (12절 체크리스트, 호스트에서 실행)
+│   ├── env_fingerprint.sh    # `.env` 시크릿 지문 대조 — 값 노출 없이 (→ D-35, DEPLOY.md 4절)
 │   └── hooks/pre-commit      # 시크릿 유출 차단 (D-33)
 ├── app/
 │   ├── main.py
