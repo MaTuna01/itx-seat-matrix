@@ -110,3 +110,9 @@ api/ ──> domain/ (순수 함수) <── scheduler/
 6. `dev -> main` 머지는 phase가 넘어갈 때 사용자에게 제안 하고 사용자가 직접 merge.가
 
 ## 보안상 위험성이 높은 민감 정보들은 .env로 관리하고 반드시 gitignore 처리
+
+`scripts/hooks/pre-commit`이 이를 기계적으로 강제한다 (D-33). 새 클론에서는 한 번
+`git config core.hooksPath scripts/hooks`를 실행해야 켜진다.
+막는 것: ① `.env.example`의 시크릿성 키에 값이 채워진 커밋 ② `.env`의 실제 값이
+들어간 커밋(파일 종류 무관) ③ `.env`·`*.db` 등 커밋 금지 파일.
+시크릿이 아닌 새 설정을 `.env.example`에 값과 함께 넣어야 하면 훅의 `PUBLIC_KEYS`에 추가한다.

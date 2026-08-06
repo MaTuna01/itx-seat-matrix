@@ -1,0 +1,102 @@
+"""매트릭스 병합 (PLAN.md 5절, D-18). 순수 함수만.
+
+조회(병렬 호출·Semaphore·지터)는 도메인의 일이 아니다 →
+`app/adapters/seatmap_fetcher.py`가 담당하고, 여기서는 그 결과를 병합만 한다.
+"""
+
+from __future__ import annotations
+
+from datetime import date as _date
+from datetime import datetime
+
+from app.domain.models import SeatMap, SeatMatrix, SeatRow, Segment, seat_key
+
+# 조회하지 않은 구간(지나온 구간·탑승 전 구간)의 셀 채움값.
+# 판정은 실효 시작 인덱스부터만 읽고, 화면은 `current_seg_idx` 이전을 흐리게 처리한다.
+# 보수적으로 '판매됨'을 채운다 — 이 값이 판정에 새어들어가도 좌석을 권하지는 않는다.
+UNQUERIED_CELL = True
+
+
+def build_segments(stops: list[str]) -> list[Segment]:
+    """정차역 N개 → 인접 구간 N-1개 (PLAN 5절 1)."""
+    return [
+        Segment(from_station=frm, to_station=to, idx=i)
+        for i, (frm, to) in enumerate(zip(stops, stops[1:]))
+    ]
+
+
+def effective_start_idx(current_seg_idx: int, board_idx: int) -> int:
+    """실효 시작 = max(현재 구간, 탑승역) (D-18 인덱스 규칙).
+
+    모든 인덱스는 **전체 노선 `stops` 기준**이다. 탑승역 이전 구간은
+    열차가 어디를 달리든 관심 밖.
+    """
+    return max(current_seg_idx, board_idx)
+
+
+def query_range(current_seg_idx: int, board_idx: int, alight_idx: int) -> tuple[int, int]:
+    """실제로 조회할 구간 인덱스 범위 `[start, end)` (PLAN 5절 2, D-17).
+
+    지나온 구간·탑승 전 구간은 판정·표시 모두에 불필요하므로 호출하지 않는다.
+    """
+    if not (0 <= board_idx < alight_idx):
+        raise ValueError(f"구간 인덱스가 올바르지 않다: board={board_idx}, alight={alight_idx}")
+    start = min(effective_start_idx(current_seg_idx, board_idx), alight_idx - 1)
+    return start, alight_idx
+
+
+def merge_seat_maps(
+    *,
+    train_no: str,
+    date: _date,
+    stops: list[str],
+    seat_maps: dict[int, SeatMap],
+    start_idx: int,
+    end_idx: int,
+    fetched_at: datetime,
+) -> SeatMatrix:
+    """구간별 좌석맵을 좌석 키로 조인해 매트릭스를 만든다 (PLAN 5절 4).
+
+    좌석 유니버스 (D-18):
+    - 유니버스 = **조회한 전 구간 응답의 합집합**
+    - 특정 구간 응답에 없는 좌석 → 그 구간은 **판매됨(True)** 으로 채운다
+
+    Phase 0 항목 6 실측 결과 코레일 응답은 '전체 좌석+상태'라 실제로는 전 구간
+    좌석 집합이 동일하다 → 이 규칙은 그 경우 단순 조인과 동일하게 동작한다.
+    응답이 부분집합으로 바뀌어도 조용히 틀리지 않도록 규칙 자체는 유지한다.
+    """
+    seg_count = len(stops) - 1
+    if not (0 <= start_idx <= end_idx <= seg_count):
+        raise ValueError(f"조회 범위가 올바르지 않다: [{start_idx}, {end_idx}) / 구간 {seg_count}개")
+
+    # 유니버스 = 합집합. 좌석 메타(car, seat_no)도 함께 보관한다.
+    universe: dict[str, tuple[int, str]] = {}
+    sold_by_seg: dict[int, dict[str, bool]] = {}
+    for seg_idx in range(start_idx, end_idx):
+        seat_map = seat_maps.get(seg_idx)
+        if seat_map is None:
+            raise ValueError(f"구간 {seg_idx}의 좌석맵이 없다 (조회 범위 불일치)")
+        by_key: dict[str, bool] = {}
+        for seat in seat_map.seats:
+            key = seat_key(seat.car, seat.seat_no)
+            universe.setdefault(key, (seat.car, seat.seat_no))
+            by_key[key] = seat.sold
+        sold_by_seg[seg_idx] = by_key
+
+    rows: list[SeatRow] = []
+    for key, (car, seat_no) in universe.items():
+        cells = [UNQUERIED_CELL] * seg_count
+        for seg_idx in range(start_idx, end_idx):
+            cells[seg_idx] = sold_by_seg[seg_idx].get(key, True)  # 부재 = 판매 (D-18)
+        rows.append(SeatRow(car=car, seat_no=seat_no, cells=cells))
+
+    rows.sort(key=lambda r: (r.car, r.seat_no))
+    return SeatMatrix(
+        train_no=train_no,
+        date=date,
+        stops=stops,
+        seats=rows,
+        fetched_at=fetched_at,
+        queried_from_idx=start_idx,
+        queried_to_idx=end_idx,
+    )
