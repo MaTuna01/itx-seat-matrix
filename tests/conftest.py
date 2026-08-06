@@ -65,6 +65,9 @@ def _isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("ADAPTER", "mock")
+    # 테스트 전용 Fernet 키 (코레일 자격증명 암호화, Phase 2 C).
+    # 고정값이라 결정적이다 — 실 키는 .env에만 있고 여기로 새지 않는다.
+    monkeypatch.setenv("SECRET_KEY", "hQ2yA1nQ8vJZ0pQ7cX5rT3uW9sB6dF4gH8kL2mN0oP4=")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

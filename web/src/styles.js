@@ -141,6 +141,17 @@ export const st = {
     marginTop: 12, fontSize: 12.5, color: "#c0392b", background: "#fdecea",
     border: "1px solid #eab5ad", borderRadius: 8, padding: "8px 10px",
   },
+  // ── 역 선택 콤보박스 (D-32) ──────────────────────────────────────
+  pickerWrap: { position: "relative" },
+  pickerList: {
+    position: "absolute", top: "100%", left: 0, right: 0, zIndex: 20,
+    margin: "4px 0 0", padding: 0, listStyle: "none",
+    maxHeight: 220, overflowY: "auto",
+    background: "#fff", border: "1.5px solid #d8dee9", borderRadius: 8,
+    boxShadow: "0 6px 20px rgba(20,30,50,.14)",
+  },
+  pickerItem: { padding: "9px 10px", fontSize: 14, cursor: "pointer" },
+
   segRow: { display: "flex", gap: 8 },
   // native date/time input은 min-width:auto라 flex로 줄지 않는다 → 겹침 방지
   segCol: { flex: 1, minWidth: 0 },

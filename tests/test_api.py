@@ -7,13 +7,17 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.adapters.korail2_adapter import CredentialsRequired, TrainStopsNotCached
+from app.api.deps import get_korail_port
+from app.domain.models import KST
 from app.storage.db import connect, db_path, dt_from_db
-from tests.conftest import enable_signup
+from app.storage.stations import Station, upsert
+from tests.conftest import enable_signup, stop_infos
 
 # 목업 열차는 운행일 08:00~08:56에 달린다. 내일 날짜를 쓰면 "운행 전"이 확정돼
 # 현재 구간이 시계와 무관하게 0이 된다 (테스트 결정성)
@@ -252,7 +256,7 @@ class TestMatrix:
         body = res.json()
         assert body["stops"] == ["천안", "평택", "수원", "안양", "영등포", "서울"]
         assert body["current_seg_idx"] == 0
-        assert body["position_source"] == "schedule"  # GPS 보정은 Phase 2
+        assert body["position_source"] == "schedule"  # GPS 파라미터를 안 보냈다
         assert len(body["seats"]) == 18
         assert body["sub_status"] == "SEATED"
         verdict = body["verdict"]
@@ -305,6 +309,181 @@ class TestMatrix:
         assert row["last_verdict_hash"] is None
         assert row["last_cells_snapshot"] is None
         assert row["last_notified_at"] is None
+
+    # ── GPS 포그라운드 보정 (D-13) ──────────────────────────────────
+    def _seed_mock_route_coords(self) -> None:
+        """목업 노선(천안~서울)에 일직선 합성 좌표를 넣는다.
+
+        실좌표가 아니라 단위 간격 직선을 쓴다 — 구간 판별이 모호하지 않고
+        실좌표 값 변경에 흔들리지 않는 결정적 테스트를 위해서다.
+        """
+        with connect(db_path()) as conn:
+            now = datetime.now(KST)
+            for i, name in enumerate(["천안", "평택", "수원", "안양", "영등포", "서울"]):
+                upsert(conn, Station(name=name, lat=36.0 + i * 0.1, lng=127.0), source="t", now=now)
+
+    def test_GPS_좌표가_있으면_현재_구간을_보정한다(self, client):
+        self._seed_mock_route_coords()
+        now_ms = datetime.now(KST).timestamp() * 1000
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={
+                "date": RIDE_DATE, "board_at": "천안", "alight_at": "서울",
+                "lat": 36.25, "lng": 127.0,  # 수원(36.2)~안양(36.3) 사이 → 구간 idx 2
+                "gps_accuracy_m": 20, "gps_fixed_at_ms": now_ms,
+            },
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["position_source"] == "gps"
+        assert body["current_seg_idx"] == 2
+
+    def test_GPS_정확도가_나쁘면_무시하고_시각표_추정을_쓴다(self, client):
+        self._seed_mock_route_coords()
+        now_ms = datetime.now(KST).timestamp() * 1000
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={
+                "date": RIDE_DATE, "board_at": "천안", "alight_at": "서울",
+                "lat": 36.25, "lng": 127.0,
+                "gps_accuracy_m": 500,  # 기본 임계값(100m) 초과
+                "gps_fixed_at_ms": now_ms,
+            },
+        )
+        body = res.json()
+        assert body["position_source"] == "schedule"
+        assert body["current_seg_idx"] == 0
+
+    def test_GPS_시각이_낡으면_무시하고_시각표_추정을_쓴다(self, client):
+        self._seed_mock_route_coords()
+        stale_ms = (datetime.now(KST).timestamp() - 60) * 1000  # 60초 전
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={
+                "date": RIDE_DATE, "board_at": "천안", "alight_at": "서울",
+                "lat": 36.25, "lng": 127.0,
+                "gps_accuracy_m": 20, "gps_fixed_at_ms": stale_ms,
+            },
+        )
+        body = res.json()
+        assert body["position_source"] == "schedule"
+
+    def test_GPS_파라미터_일부만_오면_무시한다(self, client):
+        """★ 넷 다 있어야 시도한다 — 신선도를 판단할 수 없는 상태로 좌표만 믿으면 안 된다."""
+        self._seed_mock_route_coords()
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={
+                "date": RIDE_DATE, "board_at": "천안", "alight_at": "서울",
+                "lat": 36.25, "lng": 127.0,  # accuracy/fixed_at 누락
+            },
+        )
+        body = res.json()
+        assert body["position_source"] == "schedule"
+
+    def test_GPS_좌표가_노선에서_멀면_시각표_추정으로_폴백(self, client):
+        self._seed_mock_route_coords()
+        now_ms = datetime.now(KST).timestamp() * 1000
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={
+                "date": RIDE_DATE, "board_at": "천안", "alight_at": "서울",
+                "lat": 35.115, "lng": 129.042,  # 부산 — 완전히 다른 노선
+                "gps_accuracy_m": 20, "gps_fixed_at_ms": now_ms,
+            },
+        )
+        body = res.json()
+        assert body["position_source"] == "schedule"
+
+    def test_station_테이블에_좌표가_없으면_시각표_추정을_쓴다(self, client):
+        """station 테이블 미적재 개발 환경에서도 화면이 죽지 않아야 한다."""
+        now_ms = datetime.now(KST).timestamp() * 1000
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={
+                "date": RIDE_DATE, "board_at": "천안", "alight_at": "서울",
+                "lat": 36.25, "lng": 127.0,
+                "gps_accuracy_m": 20, "gps_fixed_at_ms": now_ms,
+            },
+        )
+        assert res.status_code == 200
+        assert res.json()["position_source"] == "schedule"
+
+
+class _CredentialsRequiredPort:
+    """`Korail2Adapter`가 계정 미연결일 때의 동작을 흉내낸다."""
+
+    async def list_stations(self):
+        return []
+
+    async def search_trains(self, cred, d, frm, to, at=None):
+        raise CredentialsRequired("코레일 계정이 연결되지 않았습니다.")
+
+    async def get_train_name(self, train_no, d):
+        return None
+
+    async def get_stops(self, cred, train_no, d):
+        return stop_infos()
+
+    async def get_seat_map(self, cred, train_no, d, frm, to):
+        raise CredentialsRequired("코레일 계정이 연결되지 않았습니다.")
+
+
+class _TrainStopsNotCachedPort:
+    """`Korail2Adapter`가 정차역 캐시 미스일 때의 동작을 흉내낸다 (D-29)."""
+
+    async def list_stations(self):
+        return []
+
+    async def search_trains(self, cred, d, frm, to, at=None):
+        return []
+
+    async def get_train_name(self, train_no, d):
+        return None
+
+    async def get_stops(self, cred, train_no, d):
+        raise TrainStopsNotCached("열차 9999의 정차역이 캐시에 없다.")
+
+    async def get_seat_map(self, cred, train_no, d, frm, to):
+        raise AssertionError("get_stops에서 이미 끝났어야 한다")
+
+
+class TestKorailErrorMapping:
+    """계정 미연결/정차역 캐시 미스가 500이 아니라 의미 있는 상태코드로 나가는지.
+
+    실사용(ADAPTER=korail2) 중 `CredentialsRequired`/`TrainStopsNotCached`가
+    그대로 노출돼 500이 나던 버그의 회귀 테스트다.
+    """
+
+    def _override(self, port):
+        app.dependency_overrides[get_korail_port] = lambda: port
+
+    def teardown_method(self):
+        app.dependency_overrides.pop(get_korail_port, None)
+
+    def test_계정_미연결_matrix조회는_409(self, client):
+        self._override(_CredentialsRequiredPort())
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        assert res.status_code == 409
+
+    def test_계정_미연결_열차검색은_409(self, client):
+        self._override(_CredentialsRequiredPort())
+        res = client.get(
+            "/api/trains/search",
+            params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
+        )
+        assert res.status_code == 409
+
+    def test_정차역_캐시_미스는_404(self, client):
+        self._override(_TrainStopsNotCachedPort())
+        res = client.get(
+            "/api/trains/9999/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        assert res.status_code == 404
 
 
 def test_프리셋은_사용자별로_보인다(client, anon_client):
