@@ -350,6 +350,43 @@ scp /tmp/itx-migrate.db ubuntu@itx:~/itx-seat-matrix/data/itx.db
 > 여기저기 흘리지 마라. (재부팅하면 `/tmp`가 비워질 수 있으니, 검증까지 시간이 걸릴 것 같으면
 > 홈 디렉터리에 두는 편이 낫다.)
 
+### ③ M4를 거치고 싶으면 — **AirDrop으로 옮긴다**
+
+아이맥에서 EC2로 바로 보내는 게 짧지만, 파일을 M4에 두고 싶을 수도 있다(롤백본을 손에 두는
+셈이다). 그때는 **AirDrop**을 쓴다. 두 대가 나란히 있는 맥이므로 드래그 한 번이고,
+원격 로그인도 ssh도 필요 없다.
+
+```bash
+# 아이맥 — 데스크톱에 만든다 (AirDrop 으로 집어 보내기 쉽게)
+cd ~/itx-seat-matrix
+sqlite3 data/itx.db ".backup '$HOME/Desktop/itx-migrate.db'"
+```
+
+→ Finder에서 그 파일 우클릭 → **공유 → AirDrop → M4** (양쪽 Wi-Fi·블루투스 켜져 있어야 한다)
+
+```bash
+# M4 — 받은 파일을 확인하고 EC2로
+sqlite3 ~/Downloads/itx-migrate.db "select 'user',count(*) from user union all
+  select 'push_device',count(*) from push_device union all
+  select 'train_stop',count(*) from train_stop;"
+
+scp ~/Downloads/itx-migrate.db ubuntu@itx:~/itx-seat-matrix/data/itx.db
+```
+
+끝나면 **아이맥 데스크톱의 사본을 지운다** (`rm -P ~/Desktop/itx-migrate.db`). M4 쪽 사본은
+7·8절 검증이 끝날 때까지 롤백본으로 남긴다.
+
+> **이메일·메신저로 보내지 마라.** 이 파일에는 앱 계정의 비밀번호 해시, 아이폰 푸시
+> 엔드포인트, 그리고 **코레일 본계정 비밀번호(`korail_pw_enc`)**가 들어 있다. Fernet으로
+> 암호화돼 있지만 **복호화 키(`SECRET_KEY`)는 보관본(노션 등)에 있어** 두 곳이 각각
+> 제3자 서버에 놓이는 셈이다. 무엇보다 메일·메신저에 한번 올라간 파일은 대화방에서 지워도
+> **백업·인덱스에서 지워졌는지 확인할 방법이 없다.** AirDrop은 로컬 전송이라 사본이 남지 않는다.
+>
+> AirDrop이 잘 안 붙으면 tailnet 위로 한 번만 서빙하는 방법도 있다 — 아이맥에서
+> `cd /tmp && python3 -m http.server 8080 --bind $(tailscale ip -4)`, M4에서
+> `curl -O http://imac:8080/itx-migrate.db`, 끝나면 Ctrl-C. `--bind`를 빼면 같은 Wi-Fi의
+> 아무 기기에나 열리므로 **반드시 붙여라.**
+
 **서버에서:**
 
 ```bash
