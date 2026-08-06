@@ -199,3 +199,35 @@ def test_토글이_꺼져_있으면_디스코드로_보내지_않는다(client, 
         assert load_targets(conn, 1).discord_webhook == "https://discord.com/api/webhooks/1/xyz"
     finally:
         conn.close()
+
+
+# ── VAPID subject 정규화 (D-34 후속) ─────────────────────────────────
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("ma775100@example.com", "mailto:ma775100@example.com"),  # 스킴 없음 → 붙인다
+        ("  me@example.com  ", "mailto:me@example.com"),  # 공백 제거
+        ("mailto:me@example.com", "mailto:me@example.com"),  # 이미 있으면 그대로
+        ("https://example.com", "https://example.com"),  # https 스킴도 허용된다
+        ("", ""),  # 미설정은 미설정으로 둔다
+    ],
+)
+def test_vapid_subject에_스킴이_없으면_mailto를_붙인다(monkeypatch, raw, expected):
+    """`py_vapid`는 스킴을 필수로 요구하고, 없으면 **발송 시점에** 죽는다.
+
+    그 시점이 하필 폰에서 알림 켜기를 누른 순간이라 원인이 서버 설정이라는 걸 알기 어렵다.
+    실제로 이 실수로 한 번 막혔다 — `.env`에 이메일만 적는 건 흔하다.
+    """
+    from app.config import Settings
+
+    monkeypatch.setenv("VAPID_SUBJECT", raw)
+    assert Settings(_env_file=None).vapid_subject == expected
+
+
+def test_정규화된_subject는_py_vapid_검사를_통과한다(monkeypatch):
+    from py_vapid import _check_sub
+
+    from app.config import Settings
+
+    monkeypatch.setenv("VAPID_SUBJECT", "me@example.com")
+    assert _check_sub(Settings(_env_file=None).vapid_subject) is True
