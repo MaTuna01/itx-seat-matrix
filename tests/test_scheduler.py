@@ -482,6 +482,27 @@ async def test_정차역을_모르는_지난_날짜_구독은_만료된다(db):
     assert spy.notes == [], "지난 구독 만료로 알림을 보내면 안 된다"
 
 
+async def test_정차역_조회가_복구되면_포인터에서_이어진다(db):
+    """★ 회귀 방어. 실패 처리가 포인터를 비우면 복구돼도 그 구독은 영구히 조회되지 않는다.
+
+    캐시 적재 전에 앱이 떠 있는 상황(D-29)이 실제로 이 경로를 탄다.
+    """
+    port, spy = FakePort(cells()), SpyNotifier()
+    port.stops_error = RuntimeError("train_stop 캐시에 없다")
+    deps = deps_for(db, port, spy)
+    sub_id = make_sub(db, status="STANDING", next_poll_at=SUWON_POINT_10)
+
+    await run_tick(deps, now=SUWON_POINT_10)
+    assert spy.kinds == ["FETCH_FAILED"]
+    assert row_of(db, sub_id)["next_poll_at"] == to_db(SUWON_POINT_10), "포인터를 잃었다"
+
+    # 캐시가 채워졌다 → grace 이내면 그 포인트를 그대로 실행한다
+    port.stops_error = None
+    await run_tick(deps, now=SUWON_POINT_10 + timedelta(minutes=1))
+    assert port.seat_map_calls, "복구 후에도 조회하지 않았다"
+    assert row_of(db, sub_id)["fail_count"] == 0
+
+
 async def test_비활성_구독은_건드리지_않는다(db):
     port, spy = FakePort(cells()), SpyNotifier()
     deps = deps_for(db, port, spy)

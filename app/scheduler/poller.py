@@ -143,8 +143,10 @@ async def _run_one(
             report.expired.append(sub_id)
             report.notes.append(f"구독 {sub_id}: 정차역 미확인 + 지난 운행일 → 만료")
             return
+        # 포인터는 그대로 둔다 — 캐시가 채워지면 resolve_poll이 지각 포인트를
+        # grace 규칙대로 처리한다. 여기서 비우면 복구돼도 다시는 조회되지 않는다
         await _record_failure(
-            deps, conn, row, report, now=now, reason="정차역 정보를 얻을 수 없음", advance_to=None
+            deps, conn, row, report, now=now, reason="정차역 정보를 얻을 수 없음"
         )
         return
 
@@ -154,7 +156,7 @@ async def _run_one(
         _expire(conn, sub_id)
         report.expired.append(sub_id)
         await _record_failure(
-            deps, conn, row, report, now=now, reason="노선에서 내 역을 찾을 수 없음", advance_to=None
+            deps, conn, row, report, now=now, reason="노선에서 내 역을 찾을 수 없음"
         )
         return
     board_idx, alight_idx = names.index(row["board_at"]), names.index(row["alight_at"])
@@ -207,9 +209,8 @@ async def _run_one(
     except Exception as exc:  # noqa: BLE001 — 코레일/네트워크 장애 전반
         # 3회 재시도까지 `fetch_matrix` 안에서 이미 끝났다. 여기 오면 그 시점을 포기하고
         # 포인터를 전진시킨다 — 낡은 시점을 붙잡고 있으면 다음 조회와 겹치기만 한다 (D-17)
-        await _record_failure(
-            deps, conn, row, report, now=now, reason=str(exc), advance_to=decision.next_poll_at
-        )
+        _set_pointer(conn, sub_id, decision.next_poll_at)
+        await _record_failure(deps, conn, row, report, now=now, reason=str(exc))
         return
 
     report.polled.append(sub_id)
@@ -300,18 +301,19 @@ async def _record_failure(
     *,
     now: datetime,
     reason: str,
-    advance_to: datetime | None,
 ) -> None:
     """`FETCH_FAILED`를 **1회만** 발송한다 (8절 "복구까지 재발송 없음", D-34).
 
     `fail_count`가 그 게이트다: 실패 +1 / 성공 0 리셋 / **0→1 전이에서만** 발송.
     재시도해도 같은 결과인 실패(자격증명 미연동, 정차역 캐시 없음)도 같은 게이트를 쓴다 —
     안 보내면 알림이 조용히 죽은 것을 폰에서 알 방법이 없다 (D-34).
+
+    **포인터는 건드리지 않는다.** 전진 여부는 실패 종류마다 달라서 호출부가 정한다 —
+    여기서 일괄로 비우면 일시적 실패 한 번에 포인터를 잃고 그 구독이 영구히 조회되지 않는다.
     """
     fail_count = int(row["fail_count"] or 0) + 1
     conn.execute(
-        "UPDATE subscription SET fail_count = ?, next_poll_at = ? WHERE id = ?",
-        (fail_count, to_db(advance_to), row["id"]),
+        "UPDATE subscription SET fail_count = ? WHERE id = ?", (fail_count, row["id"])
     )
     report.notes.append(f"구독 {row['id']} 조회 실패({fail_count}회): {reason}")
     if fail_count > 1:

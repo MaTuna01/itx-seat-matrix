@@ -11,8 +11,15 @@ const CACHE = "itx-shell-v1";
 const SHELL = "/";
 
 self.addEventListener("install", (event) => {
+  // 셸 프리캐시가 실패해도 설치는 성공시킨다 (오프라인에서 갱신될 때 등).
+  // 실패로 두면 워커 자체가 설치되지 않아 **푸시 수신까지 함께 죽는다** —
+  // 오프라인 캐시는 보조 기능이고 알림이 본 기능이다.
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.add(SHELL)).then(() => self.skipWaiting())
+    caches
+      .open(CACHE)
+      .then((cache) => cache.add(SHELL))
+      .catch(() => {})
+      .then(() => self.skipWaiting())
   );
 });
 
