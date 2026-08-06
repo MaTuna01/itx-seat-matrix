@@ -1,0 +1,148 @@
+# CI — 테스트 · arm64 이미지 · 시크릿 검사 (#21)
+#
+# **배포는 하지 않는다.** 이미지를 레지스트리에 밀지 않고 러너를 tailnet에 붙이지도
+# 않는다 (CD는 #22). 여기서 하는 일은 "손으로 겪은 실패를 자동으로 다시 겪지 않기"다:
+#
+#   test     테스트 355개가 로컬에서만 돌고 있었다
+#   build    Phase 4 중 Docker Desktop이 꺼져 있어 Dockerfile 미검증 구간이 길었고
+#            결국 M4의 첫 빌드가 첫 실행이 됐다. 저장소가 public이라 `ubuntu-24.04-arm`
+#            러너가 무료다 → **QEMU 없이 네이티브 arm64로** 검증한다 (t4g.nano=Graviton)
+#   secrets  pre-commit 훅(D-33)은 새 클론에서 켜는 것을 잊으면 무력하다. CI는 잊어도 돈다
+#
+# ※ 프론트 빌드(`npm ci` + `vite build`)는 Dockerfile 1단계에 있으므로 build 잡이 이미
+#   검증한다 — node 잡을 따로 두지 마라 (두 곳에서 빌드하면 버전이 갈린다).
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  # base가 dev인 기능 PR과 dev→main 승격 PR 양쪽을 본다.
+  # fork PR도 기본 `pull_request`로 충분하다 — 시크릿을 쓰는 잡이 없으므로
+  # `pull_request_target`은 쓰지 않는다 (그쪽은 fork 코드에 시크릿을 노출한다)
+  pull_request:
+    branches: [main, dev]
+
+# 같은 브랜치에 연달아 푸시하면 앞의 실행을 버린다
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 테스트 (pytest)
+    runs-on: ubuntu-latest
+    env:
+      # 런타임과 같은 3.12로 못 박는다 — 러너가 기본 파이썬을 올려도 조용히 따라가지 않는다
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv 설치
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --locked: `uv.lock`이 pyproject.toml과 맞는지까지 본다. Dockerfile은 `--frozen`
+      # (락 그대로, 검사 없음)이라 락을 갱신하지 않고 의존성을 고치면 **이미지가 조용히
+      # 옛 의존성으로 빌드된다.** 그 함정을 여기서만 잡을 수 있다
+      - run: uv sync --locked
+
+      - name: pytest
+        # 시계에 의존하는 테스트는 없다 (전부 now 주입, CLAUDE.md 테스트 규칙).
+        # 그래도 러너의 TZ는 UTC이므로 KST 가정이 깨지면 여기서 드러난다
+        run: uv run --frozen pytest -q
+
+  build:
+    name: arm64 이미지 빌드 + 스모크
+    # public 저장소 무료 arm64 러너. x86 러너 + QEMU로 바꾸면 5분 이상 걸리고,
+    # 무엇보다 **실제로 배포하는 아키텍처가 아니게 된다**
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 빌드 (linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          # provenance=false: 붙이면 이미지가 중첩 OCI 인덱스가 되고, 구식 이미지
+          # 저장소를 쓰는 데몬에서 `docker load`가 실패할 수 있다 (DEPLOY.md 6절).
+          # 배포 절차가 `docker save | ssh docker load`이므로 CI도 같은 조건으로 짓는다
+          provenance: false
+          push: false
+          load: true
+          tags: itx-seat-matrix:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 이미지 쪽 불변식 (DEPLOY.md 12절의 호스트 쪽 점검과 짝이다) ──
+      - name: arm64 인지
+        run: |
+          arch=$(docker image inspect itx-seat-matrix:ci --format '{{.Architecture}}')
+          echo "Architecture=$arch"
+          [ "$arch" = "arm64" ] || { echo "::error::arm64가 아니다 ($arch) — t4g에서 exec format error로 죽는다"; exit 1; }
+
+      - name: KST를 알고 있는지 (tzdata)
+        # 모든 datetime이 KST aware다. slim 이미지에 tzdata가 있는지에 기대지 않고
+        # Dockerfile이 명시적으로 깔았는데, 그게 실제로 먹었는지 확인한다
+        run: docker run --rm itx-seat-matrix:ci python -c "from zoneinfo import ZoneInfo; print(ZoneInfo('Asia/Seoul'))"
+
+      - name: uid 1000 으로 도는지
+        # 어긋나면 바인드 마운트한 data/ 에 SQLite가 못 써서 500이 난다
+        run: |
+          uid=$(docker run --rm itx-seat-matrix:ci id -u)
+          echo "uid=$uid"
+          [ "$uid" = "1000" ] || { echo "::error::uid가 1000이 아니다 ($uid)"; exit 1; }
+
+      - name: 스모크 — 뜨고, 응답하고, 스케줄러가 붙는가
+        run: |
+          # ADAPTER=mock 고정. **CI가 실 코레일 API를 때리면 안 된다** (호출 예절)
+          docker run -d --name itx-ci \
+            -e ADAPTER=mock \
+            -e SCHEDULER_ENABLED=true \
+            -e LOG_LEVEL=INFO \
+            -p 127.0.0.1:8000:8000 \
+            itx-seat-matrix:ci
+          for _ in $(seq 40); do
+            if curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
+              echo "healthz 200"
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          [ "${ok:-}" = "1" ] || { echo "::error::40초 안에 /healthz 가 응답하지 않았다"; exit 1; }
+          # deploy_check.sh 와 **같은 문자열**을 찾는다. 이 줄이 사라지면 배포 점검
+          # 스크립트가 조용히 늑대소년이 되므로 여기서 함께 고정한다
+          docker logs itx-ci 2>&1 | grep -q "폴링 스케줄러 시작" \
+            || { echo "::error::스케줄러 기동 로그가 없다"; exit 1; }
+          echo "스케줄러 기동 로그 확인"
+
+      - name: 실패 시 컨테이너 로그
+        if: failure()
+        run: docker logs itx-ci 2>&1 | tail -60 || true
+
+      - name: 정리
+        if: always()
+        run: docker rm -f itx-ci || true
+
+  secrets:
+    name: 시크릿 검사
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 훅과 **같은 규칙**을 돈다 (scripts/secret_scan.py). 의존성이 없어 uv가 필요없다.
+      #
+      # ★ 이 잡은 훅을 대체하지 못한다. 훅의 핵심인 "`.env`의 실제 값이 커밋 내용에
+      #   들어갔는가"는 러너에 `.env`가 없어 원리적으로 불가능하다. 대신 스테이지가
+      #   아니라 **추적 파일 전체**를 보므로 "훅이 꺼진 클론에서 이미 들어와 버린 것"을
+      #   잡는다. 스크립트가 건너뛴 항목을 출력하니 로그에서 확인할 수 있다
+      - run: python3 scripts/secret_scan.py --mode tree
