@@ -124,3 +124,79 @@ async def test_목업_어댑터_전체_흐름():
     by_key = {row.key: row.cells for row in matrix.seats}
     # 프로토타입 목업의 3-7A: [T, T, T, F, F]
     assert by_key["3-7A"][1:] == [True, True, False, False]
+
+
+# ── 부분 매진 (D-36) — 사용자가 실제로 겪은 시나리오 ─────────────────
+def test_뒤_구간이_매진이어도_앞_구간_착석_가능이_남는다():
+    """천안→영등포 중 수원~영등포만 매진. "수원까지는 앉을 수 있다"가 살아야 한다.
+
+    매진 구간은 좌석맵이 **비어서** 온다 (D-36). 유니버스 합집합 + 부재=판매(D-18)가
+    그 구간을 전 좌석 판매로 채운다 — 앞 구간 좌석표는 그대로 남는다.
+    """
+    from app.domain.verdict import build_verdict
+    from app.domain.models import SubscriptionStatus
+
+    stops = ["천안", "평택", "수원", "안양", "영등포"]
+    # 구간 0(천안→평택), 1(평택→수원)은 빈자리 있음 / 2, 3은 매진이라 응답이 비어 있다
+    seat_maps = {
+        0: SeatMap(
+            train_no="1004", date=RIDE_DATE, frm="천안", to="평택",
+            seats=[SeatState(car=4, seat_no="1B", sold=False)], fetched_at=at(8, 0),
+        ),
+        1: SeatMap(
+            train_no="1004", date=RIDE_DATE, frm="평택", to="수원",
+            seats=[SeatState(car=4, seat_no="1B", sold=False)], fetched_at=at(8, 0),
+        ),
+        2: SeatMap(
+            train_no="1004", date=RIDE_DATE, frm="수원", to="안양",
+            seats=[], fetched_at=at(8, 0),  # ← 매진
+        ),
+        3: SeatMap(
+            train_no="1004", date=RIDE_DATE, frm="안양", to="영등포",
+            seats=[], fetched_at=at(8, 0),  # ← 매진
+        ),
+    }
+    matrix = merge_seat_maps(
+        train_no="1004", date=RIDE_DATE, stops=stops, seat_maps=seat_maps,
+        start_idx=0, end_idx=4, fetched_at=at(8, 0),
+    )
+
+    assert [s.key for s in matrix.seats] == ["4-1B"]
+    assert matrix.seats[0].cells == [False, False, True, True]
+
+    verdict = build_verdict(
+        matrix=matrix, status=SubscriptionStatus.STANDING,
+        board_idx=0, alight_idx=4, current_seg_idx=0,
+    )
+    top = verdict.move_to[0]
+    assert (top.car, top.seat_no) == (4, "1B")
+    assert top.clear_all is False
+    assert top.clear_until_idx == 2, "수원까지 앉을 수 있다고 나와야 한다"
+    assert verdict.all_sold_after_current is False
+
+
+def test_전_구간_매진이면_전부_판매된_매트릭스다():
+    """조회 실패가 아니다 — ALL_SOLD로 "환승 고려"를 띄우는 것이 올바른 결과다."""
+    from app.domain.verdict import build_verdict
+    from app.domain.models import SubscriptionStatus
+
+    stops = ["천안", "평택", "수원"]
+    seat_maps = {
+        i: SeatMap(
+            train_no="1004", date=RIDE_DATE, frm=stops[i], to=stops[i + 1],
+            seats=[], fetched_at=at(8, 0),
+        )
+        for i in range(2)
+    }
+    matrix = merge_seat_maps(
+        train_no="1004", date=RIDE_DATE, stops=stops, seat_maps=seat_maps,
+        start_idx=0, end_idx=2, fetched_at=at(8, 0),
+    )
+    assert matrix.seats == []
+
+    verdict = build_verdict(
+        matrix=matrix, status=SubscriptionStatus.STANDING,
+        board_idx=0, alight_idx=2, current_seg_idx=0,
+    )
+    assert verdict.move_to == []
+    assert verdict.all_sold_after_current is True

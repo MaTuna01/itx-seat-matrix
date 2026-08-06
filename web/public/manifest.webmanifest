@@ -1,0 +1,26 @@
+{
+  "name": "ITX 자유석 좌석 매트릭스",
+  "short_name": "ITX 좌석",
+  "description": "좌석 × 구간 매트릭스로 앉을 자리를 직접 판단하는 통근 도구",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f7f8fa",
+  "theme_color": "#1a3a6b",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

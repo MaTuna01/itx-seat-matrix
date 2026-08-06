@@ -245,6 +245,37 @@ class TestSubscriptionTransition:
         assert client.delete(f"/api/subscriptions/{sub['id']}").status_code == 204
         assert client.get("/api/subscriptions").json() == []
 
+    def test_active_only_false는_종료한_구독을_최근순으로_준다(self, client):
+        """탑승 등록 화면의 직전 구간 프리필이 이 파라미터에 걸려 있다 (이슈 #12).
+
+        기본값(활성만)이 바뀌면 라우팅이 끝난 열차의 매트릭스를 띄우고,
+        정렬이 바뀌면 프리필이 엉뚱한 구간을 채운다. 둘 다 조용히 틀린다.
+        """
+        older = make_subscription(client, board_at="천안", alight_at="수원")
+        newer = make_subscription(client, board_at="평택", alight_at="서울")
+        for sub in (older, newer):
+            client.delete(f"/api/subscriptions/{sub['id']}")
+
+        assert client.get("/api/subscriptions").json() == [], "기본값은 활성만"
+
+        rows = client.get("/api/subscriptions", params={"active_only": "false"}).json()
+        assert [r["id"] for r in rows] == [newer["id"], older["id"]], "created_at DESC"
+        assert rows[0]["board_at"] == "평택" and rows[0]["alight_at"] == "서울"
+        assert all(r["active"] is False for r in rows)
+
+    def test_남의_종료된_구독은_보이지_않는다(self, client, anon_client):
+        """프리필 소스가 user_id로 갈리는지 (절대규칙 9)."""
+        mine = make_subscription(client)
+        client.delete(f"/api/subscriptions/{mine['id']}")
+        enable_signup(client)
+        anon_client.post(
+            "/api/auth/signup",
+            json={"email": "other2@example.com", "password": "commute-1234", "display_name": "남"},
+        )
+        assert anon_client.get(
+            "/api/subscriptions", params={"active_only": "false"}
+        ).json() == []
+
 
 class TestMatrix:
     def test_응답_스키마는_PLAN_7절과_같다(self, client):

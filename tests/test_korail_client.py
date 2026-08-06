@@ -158,3 +158,36 @@ def test_parse_train_summary_times_are_kst_aware() -> None:
 def test_same_train_no_ignores_leading_zeros(a, b, expected) -> None:  # noqa: ANN001
     """`'01472'`를 `'1472'`로 못 찾으면 열차가 조용히 사라진다."""
     assert same_train_no(a, b) is expected
+
+
+# ── 매진 분류 (D-36) ─────────────────────────────────────────────────
+import pytest as _pytest  # noqa: E402
+
+from app.adapters.korail_client import (  # noqa: E402
+    KorailApiError,
+    KorailSoldOut,
+    looks_sold_out,
+)
+
+
+@_pytest.mark.parametrize(
+    "msg_cd,msg_txt,expected",
+    [
+        ("WRX", "잔여석이 없습니다", True),
+        ("WRX", "매진되었습니다", True),
+        ("WRX", "예약가능한 좌석이 없습니다", True),
+        ("WRX", "잔여석 부족", True),
+        # 매진과 무관한 실패는 그대로 에러여야 한다 — 삼키면 진짜 장애가 숨는다
+        ("WRX", "시스템 점검 중입니다", False),
+        ("WRX", "일시적인 오류가 발생했습니다", False),
+        ("WRX", "", False),
+    ],
+)
+def test_매진_문구를_분류한다(msg_cd, msg_txt, expected):
+    """코드값이 확정되지 않아 문구로 판별한다. 놓치면 조회 전체가 실패한다 (D-36)."""
+    assert looks_sold_out(msg_cd, msg_txt) is expected
+
+
+def test_매진은_KorailApiError의_하위형이다():
+    """기존 `except KorailApiError` 처리를 깨지 않으면서 따로 잡을 수 있어야 한다."""
+    assert issubclass(KorailSoldOut, KorailApiError)

@@ -40,6 +40,17 @@ NEED_LOGIN_CODES = frozenset({"P058"})
 # 결과 없음 — 실패가 아니라 '해당 없음'이다 (korail2 NoResultsError.codes)
 NO_RESULT_CODES = frozenset({"P100", "WRG000000", "WRD000061", "WRT300005"})
 
+# 매진 — **실패가 아니라 데이터다** (D-36). "이 구간엔 팔 좌석이 없다"는 뜻이고,
+# 좌석맵 관점에서는 '전 좌석 판매됨'과 같다. 조회 에러로 취급하면 앞 구간에서 이미
+# 받아온 좌석표까지 함께 버려진다.
+#
+# 코드값을 확정하지 못해 **문구도 함께 본다.** 코레일은 같은 상황에 여러 코드를 쓰고
+# 우리가 관측한 표본이 좁다. 문구 매칭은 취약하지만, 놓쳤을 때의 대가(조회 전체 실패)가
+# 오탐의 대가(매진으로 잘못 표시 → 추천에서 빠짐)보다 크다.
+# 원칙 1(역/노선 하드코딩 금지)과는 무관하다 — 외부 API의 에러 문구지 도메인 값이 아니다.
+SOLD_OUT_CODES: frozenset[str] = frozenset()  # 실측되면 여기에 추가한다
+SOLD_OUT_HINTS = ("잔여석", "매진", "좌석이 없", "여석이 없")
+
 
 class KorailApiError(RuntimeError):
     """코레일이 `strResult=FAIL`을 준 경우."""
@@ -52,6 +63,21 @@ class KorailApiError(RuntimeError):
 
 class KorailSessionExpired(KorailApiError):
     """세션 만료. 재로그인 후 1회 재시도한다."""
+
+
+class KorailSoldOut(KorailApiError):
+    """이 구간에 팔 좌석이 없다 (D-36).
+
+    **조회 실패가 아니라 '전부 판매됨'이라는 데이터다.** 재시도 대상도 아니다 —
+    30초 뒤에 물어도 매진은 매진이다. 좌석맵 경로에서 빈 결과로 흡수한다.
+    """
+
+
+def looks_sold_out(msg_cd: str, msg_txt: str) -> bool:
+    """코레일 FAIL 응답이 '매진'을 뜻하는가. 코드 우선, 없으면 문구."""
+    if msg_cd in SOLD_OUT_CODES:
+        return True
+    return any(hint in msg_txt for hint in SOLD_OUT_HINTS)
 
 
 class KorailBlocked(KorailApiError):
@@ -217,6 +243,9 @@ class KorailClient:
             raise KorailSessionExpired(msg_cd, msg_txt)
         if "MACRO" in msg_cd.upper() or "MACRO" in msg_txt.upper():
             raise KorailBlocked(msg_cd, msg_txt)
+        # 매진은 로그인·차단 판정 뒤에 본다 — 앞의 둘이 더 근본적인 상태다
+        if looks_sold_out(msg_cd, msg_txt):
+            raise KorailSoldOut(msg_cd, msg_txt)
         raise KorailApiError(msg_cd, msg_txt)
 
     # -- 조회 3종 ----------------------------------------------------------
@@ -253,6 +282,10 @@ class KorailClient:
         }
         try:
             body = self._post(URL_SCHEDULE, payload)
+        except KorailSoldOut:
+            # 매진도 '해당 없음'과 같다 — 이 구간에 팔 열차가 없다는 답이다 (D-36).
+            # 호출부(find_train)가 None을 받고 전 좌석 판매로 처리한다.
+            return []
         except KorailApiError as exc:
             if exc.msg_cd in NO_RESULT_CODES:
                 return []

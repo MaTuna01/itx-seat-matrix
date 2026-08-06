@@ -22,6 +22,7 @@ from app.adapters.korail2_adapter import (
     TrainStopsNotCached,
     TrainObservations,
 )
+from app.adapters.korail_client import KorailSoldOut
 from app.domain.models import KST, KorailCred, SeatState
 
 RIDE_DATE = _date(2026, 8, 6)
@@ -108,11 +109,19 @@ async def test_call_count_matches_policy(adapter_with) -> None:
     assert (client.schedule_calls, client.car_list_calls, len(client.seat_calls)) == (1, 1, 2)
 
 
-async def test_missing_train_raises_value_error(adapter_with) -> None:
-    """ValueError는 재시도 대상이 아니다 — 다시 불러도 같은 답이다."""
+async def test_구간에_열차가_없으면_빈_좌석맵이다_에러가_아니다(adapter_with) -> None:
+    """★ D-36. 매진 구간은 ScheduleView가 결과를 주지 않는다.
+
+    그걸 "열차가 없다"로 읽고 예외를 던지면 **앞 구간에서 이미 받아온 좌석표까지
+    통째로 버린다** — 중간까지만이라도 앉을 수 있다는 가장 쓸모 있는 정보가 사라진다.
+    빈 좌석맵은 `merge_seat_maps`가 전 좌석 판매로 채운다 (D-18).
+    """
     client = FakeClient([car(1)], train=None)
-    with pytest.raises(ValueError):
-        await adapter_with(client).get_seat_map(CRED, "9999", RIDE_DATE, "천안", "수원")
+    result = await adapter_with(client).get_seat_map(CRED, "9999", RIDE_DATE, "천안", "수원")
+
+    assert result.seats == []
+    # 열차를 못 찾았으면 호차·좌석 조회로 넘어가지 않는다 (호출 예절)
+    assert client.car_list_calls == 0
     assert client.seat_calls == []
 
 
@@ -227,3 +236,52 @@ async def test_missing_credentials_raise_clear_error() -> None:
 
     with pytest.raises(CredentialsRequired):
         await Korail2Adapter().search_trains(None, RIDE_DATE, "천안", "수원")
+
+
+# ── 매진을 데이터로 흡수한다 (D-36) ──────────────────────────────────
+class SoldOutCarListClient(FakeClient):
+    """호차 조회 단계에서 매진을 알리는 코레일."""
+
+    def car_list(self, train):  # noqa: ANN001, ANN201
+        self.car_list_calls += 1
+        raise KorailSoldOut("WRXXX", "잔여석이 없습니다")
+
+
+class SoldOutOneCarClient(FakeClient):
+    """호차 목록을 받은 사이 특정 호차만 팔린 경우."""
+
+    def __init__(self, cars, sold_out_car: int) -> None:
+        super().__init__(cars)
+        self._sold_out_car = sold_out_car
+
+    def seat_states(self, train, car_no):  # noqa: ANN001, ANN201
+        self.seat_calls.append(car_no)
+        if car_no == self._sold_out_car:
+            raise KorailSoldOut("WRXXX", "잔여석이 없습니다")
+        return [SeatState(car=car_no, seat_no="1A", sold=False)]
+
+
+async def test_호차_조회가_매진이면_빈_좌석맵이다(adapter_with) -> None:
+    client = SoldOutCarListClient([car(1), car(2)])
+    result = await adapter_with(client).get_seat_map(CRED, "1472", RIDE_DATE, "천안", "수원")
+
+    assert result.seats == []
+    assert client.seat_calls == []
+
+
+async def test_한_호차만_매진이면_나머지_호차는_살린다(adapter_with) -> None:
+    """여기서 예외를 올리면 **다른 호차의 빈자리까지 함께 사라진다.**"""
+    client = SoldOutOneCarClient([car(1), car(2), car(3)], sold_out_car=2)
+    result = await adapter_with(client).get_seat_map(CRED, "1472", RIDE_DATE, "천안", "수원")
+
+    assert client.seat_calls == [1, 2, 3]  # 매진 호차에서 멈추지 않는다
+    assert sorted(s.car for s in result.seats) == [1, 3]
+
+
+async def test_매진이어도_열차명_지연은_주워_담는다(adapter_with) -> None:
+    """관측은 find_train 직후다 — 매진이라고 열차명·지연까지 잃을 이유가 없다."""
+    adapter = adapter_with(SoldOutCarListClient([car(1)]))
+    await adapter.get_seat_map(CRED, "1472", RIDE_DATE, "천안", "수원")
+
+    assert adapter.observations.name("1472", RIDE_DATE) == "무궁화호"
+    assert adapter.observations.delay("1472", RIDE_DATE) == 15
