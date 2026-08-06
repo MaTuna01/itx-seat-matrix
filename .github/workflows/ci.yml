@@ -45,7 +45,9 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: uv 설치
-        uses: astral-sh/setup-uv@v9
+        # 정확한 태그로 고정한다 — setup-uv는 떠 있는 메이저 태그를 v7까지만 만들어서
+        # `@v9`는 "unable to find version"으로 죽는다 (한 번 밟았다). node24 액션이다
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
