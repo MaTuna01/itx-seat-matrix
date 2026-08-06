@@ -74,7 +74,10 @@ export const api = {
     return request(`/api/trains/search?${params}`);
   },
 
-  subscriptions: () => request("/api/subscriptions"),
+  // 기본은 활성 구독만 — 라우팅(App.jsx)이 이 결과로 매트릭스/탑승 등록을 가른다.
+  // activeOnly:false는 종료한 구독까지 포함한다. 직전 구간 프리필의 소스다 (Setup.jsx).
+  subscriptions: ({ activeOnly = true } = {}) =>
+    request(`/api/subscriptions${activeOnly ? "" : "?active_only=false"}`),
   createSubscription: (payload) =>
     request("/api/subscriptions", { method: "POST", body: payload }),
   // 앉음 / 이동 / 일어남 — 전이는 전부 이 하나로 (D-15)

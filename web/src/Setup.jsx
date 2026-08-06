@@ -18,6 +18,16 @@ const nowParts = () => {
   };
 };
 
+// 직전에 탄 구간. "탑승 종료"는 하드 삭제가 아니라 active=0이므로(api/subscriptions.py)
+// 지난 구독이 그대로 남아 있고, 목록은 created_at DESC다 — 앞쪽이 최근이다.
+// 역 목록에 없는 이름은 건너뛴다: 채워 놓아도 검색이 실패해 빈 칸보다 나쁘다.
+// 운행일·시각은 프리필하지 않는다 — 어제 날짜가 들어가 있는 편이 훨씬 나쁜 버그다.
+export function lastRoute(subs, stations) {
+  const names = new Set(stations.map((s) => s.name));
+  const last = subs.find((s) => names.has(s.board_at) && names.has(s.alight_at));
+  return last ? { from: last.board_at, to: last.alight_at } : null;
+}
+
 const hhmm = (iso) =>
   new Date(iso).toLocaleTimeString("ko-KR", {
     timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", hour12: false,
@@ -34,10 +44,26 @@ export default function Setup({ onCreated, onOpenSettings }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    // 역은 비워 둔 채 시작한다. 목업(6개) 시절엔 노선 양 끝을 기본값으로 넣었지만,
-    // 실테이블 282개에서 가나다순 처음/끝은 아무 의미가 없다 — 어차피 둘 다 바꿔야 한다.
-    // 자주 쓰는 구간을 채우는 것은 프리셋의 일이다 (Phase 4).
-    api.stations().then(setStations).catch((err) => setError(err.message));
+    let alive = true;
+    (async () => {
+      // 직전 구간 조회는 **실패해도 되는 부가 기능**이다 — 여기서 막히면 탑승 등록 자체를
+      // 못 한다. 역 목록만 필수로 두고 구독 조회의 실패는 삼킨다.
+      const [list, past] = await Promise.all([
+        api.stations(),
+        api.subscriptions({ activeOnly: false }).catch(() => []),
+      ]);
+      if (!alive) return;
+      setStations(list);
+      const route = lastRoute(past, list);
+      // 조회가 늦게 도착했는데 사용자가 이미 역을 골랐다면 덮어쓰지 않는다.
+      // 프리필은 거들 뿐이고, 사용자가 방금 한 입력이 사라지는 쪽이 훨씬 나쁘다.
+      if (route) setQuery((q) => (q.from || q.to ? q : { ...q, ...route }));
+    })().catch((err) => {
+      if (alive) setError(err.message);
+    });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const set = (key) => (e) => setQuery({ ...query, [key]: e.target.value });
