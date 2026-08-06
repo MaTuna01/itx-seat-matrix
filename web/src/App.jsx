@@ -6,6 +6,14 @@ import Settings from "./Settings";
 import Setup from "./Setup";
 import { css, st } from "./styles";
 
+// 알림 탭 딥링크 (D-20). service worker가 `/?sub=<id>`로 열어주면 그 구독을 띄운다 —
+// 알림을 눌렀는데 홈이나 다른 열차가 뜨면 "앱을 열 시점을 알리는 장치"의 절반이 무용해진다.
+function deepLinkedSubId() {
+  const raw = new URLSearchParams(window.location.search).get("sub");
+  const id = Number(raw);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
 // 라우팅: 세션 확인 → (없으면) 로그인 → (활성 구독 없으면) 탑승 등록 → 매트릭스.
 // 401은 어디서 나든 로그인 화면으로 되돌린다 (PLAN 6절).
 export default function App() {
@@ -15,7 +23,11 @@ export default function App() {
     try {
       const user = await api.me();
       const subs = await api.subscriptions();
-      setState({ phase: subs.length ? "matrix" : "setup", user, subscription: subs[0] ?? null });
+      const wanted = deepLinkedSubId();
+      // 딥링크가 가리키는 구독이 이미 만료됐으면(하차 후 알림을 늦게 봤을 때)
+      // 조용히 최신 구독으로 떨어진다 — 빈 화면보다 낫다
+      const subscription = subs.find((s) => s.id === wanted) ?? subs[0] ?? null;
+      setState({ phase: subscription ? "matrix" : "setup", user, subscription });
     } catch (err) {
       if (err instanceof UnauthorizedError) setState({ phase: "login" });
       else setState({ phase: "error", error: err.message });

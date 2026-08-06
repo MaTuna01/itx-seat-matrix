@@ -43,6 +43,23 @@ export const api = {
     request("/api/me/korail", { method: "PUT", body: { korail_id, korail_pw } }),
   unlinkKorail: () => request("/api/me/korail", { method: "DELETE" }),
 
+  // 디스코드 웹훅 (D-11). 저장 시 서버가 즉시 테스트 발송해 URL을 검증한다 —
+  // 실패하면 422이고 저장되지 않는다. 응답은 MeOut이라 URL은 절대 되돌아오지 않는다
+  linkDiscord: (webhook_url) =>
+    request("/api/me/discord", { method: "PUT", body: { webhook_url } }),
+  setDiscordEnabled: (enabled) =>
+    request("/api/me/discord", { method: "PATCH", body: { enabled } }),
+  unlinkDiscord: () => request("/api/me/discord", { method: "DELETE" }),
+
+  // 알림 기기 (D-20). config는 VAPID 공개키만 준다
+  pushConfig: () => request("/api/push/config"),
+  pushDevices: () => request("/api/push/devices"),
+  registerPushDevice: ({ endpoint, keys, label }) =>
+    request("/api/push/devices", { method: "POST", body: { endpoint, keys, label } }),
+  deletePushDevice: (id) => request(`/api/push/devices/${id}`, { method: "DELETE" }),
+  // iOS 웹푸시는 조용히 실패하는 일이 잦다 — 상시 점검 수단 (D-9)
+  pushTest: () => request("/api/push/test", { method: "POST" }),
+
   // 관리자 전용 (D-24). 비관리자는 403
   adminSettings: () => request("/api/admin/settings"),
   setSignupEnabled: (signup_enabled) =>

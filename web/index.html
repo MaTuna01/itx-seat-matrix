@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#1a3a6b" />
     <title>ITX 좌석 매트릭스</title>
+
+    <!-- PWA (Phase 3). iOS 웹푸시는 **홈화면에 추가된 앱**에서만 동작하므로
+         manifest와 apple-touch-icon이 알림 기능의 전제조건이다 (D-1/D-9). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="ITX 좌석" />
   </head>
   <body>
     <div id="root"></div>
