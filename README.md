@@ -82,7 +82,8 @@ FastAPI 단일 앱 (Python 3.12, 컨테이너 1개)
 | 1 | 뼈대 + 계정 + Mock 어댑터로 전체 관통 | ✅ 완료 |
 | 2 | 코레일 실연동 + 정차역·역 마스터 + 지연 정보 + GPS 보정 | ✅ 완료 |
 | 3 | 알림 + 스케줄러 자동화 + PWA | ✅ 코드 완료 · 실기기 검증 진행 중 |
-| 4 | 배포(EC2) + 이동 조합 추천 등 개선 | ⏳ 다음 |
+| 4 | 배포(EC2 + Docker + Tailscale) | 🚧 산출물 완료 · 프로비저닝/실기기 검증 대기 |
+| 이후 | 이동 조합 추천, 좌석 점유 이력 통계 | 설계 미정 — 합의 후 별도 이슈 |
 
 ### Phase 0 결과가 설계를 바꿨다
 
@@ -97,11 +98,14 @@ FastAPI 단일 앱 (Python 3.12, 컨테이너 1개)
 
 코드는 `dev`에 머지됐고 **푸시 배달 경로는 실기기로 확인됐다** — 아이폰 홈화면 PWA에서 테스트 알림 수신 성공(로컬 iMac을 `tailscale serve`로 신뢰 HTTPS 프록시). 남은 것은 **"역 접근 시 자동 갱신 → 알림 수신"을 실제 출근길에서 한 번 통과시키는 것**이다. 맥이 잠들면 30초 틱이 멈추므로, Phase 4 배포가 이 검증을 푸는 실질적인 열쇠다.
 
+검증 절차와 실패 시 볼 로그는 [DEPLOY.md 10절](./DEPLOY.md)에 있다. 준비 중에 **앱 로그가 한 줄도 나오지 않고 있었다는 것**을 발견해 함께 고쳤다 — uvicorn이 root 로거를 비워두는 탓에 `log.info`가 전부 유실되고 있었고, 배포 후에는 그 로그가 관측 수단의 전부다 (D-39).
+
 ## 문서
 
-- **[PLAN.md](./PLAN.md)** — 전체 기획·설계 문서 (v11). 단일 진실 원천이며 구현 시 Claude Code의 컨텍스트로 사용
-- PLAN.md **17절 결정 이력(D-1 ~ D-37)** — "왜 이렇게 했지?"의 답. 뒤집힌 결정도 지우지 않고 개정 이력으로 남긴다
+- **[PLAN.md](./PLAN.md)** — 전체 기획·설계 문서 (v12). 단일 진실 원천이며 구현 시 Claude Code의 컨텍스트로 사용
+- PLAN.md **17절 결정 이력(D-1 ~ D-41)** — "왜 이렇게 했지?"의 답. 뒤집힌 결정도 지우지 않고 개정 이력으로 남긴다
 - **[CLAUDE.md](./CLAUDE.md)** — 작업 규칙. 조용히 틀리는 지점들(KST aware, `now` 주입, 동기 라이브러리 격리 등)
+- **[DEPLOY.md](./DEPLOY.md)** — 배포 절차 (EC2 + Docker + Tailscale). PLAN.md 12절의 실행편이고, 배포 후 실기기 검증 체크리스트와 실패 시 볼 로그도 여기 있다
 - **[seat-matrix.jsx](./seat-matrix.jsx)** — 매트릭스 화면 프로토타입. `/matrix` 응답 스키마와 1:1
 
 ## 실행
@@ -136,6 +140,18 @@ uv run python scripts/load_train_stops.py
 ```
 
 정차역 캐시는 정적 참조가 아니라 **최근 운행일 실적**이다. 열차번호는 개정으로 바뀔 수 있으므로 주기적으로 다시 적재해야 신선도가 유지된다.
+
+### 배포
+
+컨테이너 1개(`Dockerfile` + `docker-compose.yml`)를 EC2 t4g.nano(**Ubuntu 24.04 LTS arm64**,
+D-42)에서 돌리고 Tailscale로 접근한다. **절차는 [DEPLOY.md](./DEPLOY.md)를 따른다** —
+조용히 틀리는 지점(arm64 / 스왑 / `--workers 1` / `SECRET_KEY`·VAPID 이관 / WAL DB 이관 /
+`docker save`의 중첩 index)이 거기 정리돼 있다.
+
+```bash
+docker compose up -d --no-build     # 이미지는 Apple Silicon 맥에서 빌드해 올린다 (D-40)
+./scripts/deploy_check.sh           # 배포 상태를 한 번에 점검
+```
 
 새 클론에서는 시크릿 유출 방지 훅을 한 번 켠다:
 

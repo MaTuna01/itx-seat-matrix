@@ -41,6 +41,18 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_interval_seconds: int = 30
 
+    # ── 로깅 (PLAN 12절, → D-39) ────────────────────────────────────
+    # 배포에서 스케줄러가 도는지 확인할 유일한 수단이다 (`docker compose logs`).
+    # uvicorn은 자기 로거만 설정하고 root는 비워두므로 앱이 직접 붙여야 한다
+    # (`main.configure_logging`). 시끄러우면 WARNING으로 올린다.
+    log_level: str = "INFO"
+
+    @field_validator("log_level")
+    @classmethod
+    def _normalize_log_level(cls, value: str) -> str:
+        """`info` 같은 소문자를 허용한다. `logging`은 대문자 이름만 안다."""
+        return value.strip().upper() or "INFO"
+
     @field_validator("vapid_subject")
     @classmethod
     def _normalize_vapid_subject(cls, value: str) -> str:
