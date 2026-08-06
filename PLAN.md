@@ -517,9 +517,13 @@ PATCH  /api/subscriptions/{id}   { status?, my_car?, my_seat_no? }   ★ 상태 
        → "여기 앉았음" (STANDING→SEATED), "자리 옮겼음" (좌석 변경), "일어났음" (SEATED→STANDING)
 DELETE /api/subscriptions/{id}                    # 하차/취소
 
-POST   /api/push/devices    { endpoint, keys, label }    → 기기 등록
+GET    /api/push/config     → { vapid_public_key, configured }   # 공개키만. 비밀키는 env (→ D-34)
+GET    /api/push/devices    → [{ id, label, created_at }]        # endpoint·키는 응답에 없다
+POST   /api/push/devices    { endpoint, keys, label }    → 기기 등록 (endpoint UPSERT)
 DELETE /api/push/devices/{id}
 POST   /api/push/test                                    → 테스트 발송 ★
+       → { sent, devices, errors[] }. 발송 실패도 200이다 — 실패 이유를 화면에
+         그대로 보여주는 것이 이 엔드포인트의 목적이다 (→ D-9)
 ```
 
 > **모든 `/api/*`는 세션 인증 필수** (`Depends(current_user)`).
@@ -564,7 +568,7 @@ POST   /api/push/test                                    → 테스트 발송 �
 | `MY_SEAT_SOLD` ★ | 착석 | 내 좌석이 **잔여 이용구간 내** 어디서든 판매됨. SOLD_FROM 상태가 지속되는 동안은 준-입석으로 취급해 **최상위 추천이 바뀌면 재발송** (구 `RECOMMEND_CHANGED` 흡수) | "3-7A 수원부터 판매됨 → 4호차 1B로 이동" / "1B 판매됨 → 4호차 4B로 변경" |
 | `SEAT_EXTENDED` | 착석 | 내 좌석의 잔여 구간 셀 중 **판매(true)→빈자리(false) 전이** 발생. 실제 취소/환불과 1:1 대응 (하단 '감지 방식' 참고) | "3-7A 안양까지로 연장됨 (이동 불필요)" / "3-7A 서울까지 확보 — 이동 불필요" |
 | `ALL_SOLD` | 공통 | 남은 구간에 앉을/옮길 좌석 전무 | "수원 이후 잔여 없음 → 1호선 환승 고려" |
-| `FETCH_FAILED` | 공통 | **한 조회 시점 내 30초 간격 3회 재시도 모두 실패** (→ D-17) | "좌석 정보 갱신 실패 · 화면 데이터 낡음" |
+| `FETCH_FAILED` | 공통 | **한 조회 시점 내 30초 간격 3회 재시도 모두 실패** (→ D-17). 재시도해도 같은 결과인 실패(자격증명 미연동, 정차역 캐시 없음)도 같은 게이트로 1회 (→ D-34) | "좌석 정보 갱신 실패 · 화면 데이터 낡음 (원인)" |
 
 **알림 시점 = 조회 시점이다.** 조회가 있어야 변화를 알 수 있으므로,
 **조회 시점(정차역 도착 -10분 / -4분)이 알림 타이밍을 결정**한다:
@@ -610,7 +614,8 @@ POST   /api/push/test                                    → 테스트 발송 �
 - `SEATS_AVAILABLE` 다이제스트는 **상위 3석**(clear_all 우선)까지만 + "외 N석" —
   상한은 설정값으로 격리 (→ D-17, D-20)
 - 하차역 도착 시각 경과 시 구독 자동 만료 → 알림 자동 중단
-- `FETCH_FAILED`는 1회 발송 후 복구까지 재발송 없음 (실패 알림 스팸 방지)
+- `FETCH_FAILED`는 1회 발송 후 복구까지 재발송 없음 (실패 알림 스팸 방지).
+  게이트는 `subscription.fail_count`다 — 실패 +1 / 성공 0 리셋 / **`0→1` 전이에서만 발송** (→ D-34)
 - **한계**: 추천 좌석이 판매 데이터상 비어 있어도 입석 승객이 점유 중일 수 있다.
   그래서 알림 본문의 추천도 화면의 추천도 **복수 후보를 전제**로 한다 (5절, → D-17)
 
@@ -795,6 +800,14 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
   (푸시 권한 요청은 설정 화면 버튼 탭에서만 — iOS 제약)
 - ✅ 완료 기준: 탑승 등록 → 역 접근 시 자동 갱신 → [입석] 착석 가능 다이제스트 수신 /
   [착석] 내 자리 판매 시 폰에 알림 수신 → 앱에서 "이 자리에 앉음" → 이후 알림이 새 자리 기준으로 발송
+  → **2026-08-06 코드 완료** (이슈 #8). pytest 324 통과, 프론트 빌드 성공.
+  A~F 전부 구현: `NotifierPort`+웹푸시/디스코드, APScheduler 30초 틱, 폴링 사이클 배선,
+  구독 자동 만료, `/api/push/*`+설정 UI, PWA(manifest/sw/딥링크/오프라인).
+  **실기기 검증은 남아 있다** — 전제조건 3개: ① `.env`에 VAPID 키
+  (`uv run python scripts/gen_vapid.py`) ② HTTPS로 서빙 (iOS 웹푸시는 http에서 동작하지
+  않는다 — Tailscale serve 또는 Phase 4 배포) ③ 사파리 "홈 화면에 추가" 후 그 앱에서
+  알림 켜기. 스케줄러 로직은 `now` 주입 테스트로 잠갔으므로 남은 미검증 구간은
+  **실제 배달 경로(APNs)와 iOS 권한 흐름**뿐이다
 
 ### Phase 4 — 배포 + 개선
 - EC2 t4g.nano 프로비저닝, Docker, Tailscale serve
@@ -885,16 +898,22 @@ itx-seat-matrix/
 ├── Dockerfile
 ├── .env.example
 ├── scripts/
-│   └── phase0_feasibility.py # Phase 0 일회성 검증 스크립트
+│   ├── phase0_feasibility.py # Phase 0 일회성 검증 스크립트
+│   ├── load_train_stops.py   # 정차역 캐시 적재 (D-29)
+│   ├── gen_vapid.py          # VAPID 키페어 생성 (일회성, → D-34)
+│   ├── gen_icons.py          # PWA 아이콘 생성 (일회성)
+│   └── hooks/pre-commit      # 시크릿 유출 차단 (D-33)
 ├── app/
 │   ├── main.py
 │   ├── api/
 │   │   ├── auth.py
-│   │   ├── me.py
-│   │   ├── trains.py
+│   │   ├── admin.py          # 가입 허용 토글 (D-24)
+│   │   ├── me.py             # 코레일 자격증명 + 디스코드 웹훅
+│   │   ├── stations.py
+│   │   ├── trains.py         # ★ /matrix
 │   │   ├── presets.py
 │   │   ├── subscriptions.py  # CRUD + PATCH 상태 전이
-│   │   └── push.py
+│   │   └── push.py           # 기기 등록 + VAPID 공개키 + 테스트 발송
 │   ├── auth/
 │   │   ├── session.py        # 쿠키 세션, current_user 의존성
 │   │   └── crypto.py         # argon2 해시, Fernet 암복호화
@@ -909,27 +928,45 @@ itx-seat-matrix/
 │   │   ├── korail_port.py
 │   │   ├── korail_mock.py
 │   │   ├── korail2_adapter.py
+│   │   ├── korail_client.py      # korail2 래핑 + DynaPath 우회 (D-22)
+│   │   ├── korail_dynapath.py
+│   │   ├── seatmap_fetcher.py    # 구간 병렬 조회 + 재시도 (화면/스케줄러 공용)
 │   │   ├── delay_port.py
 │   │   ├── delay_zero.py         # 기본: 항상 None (지연 0 간주)
-│   │   ├── notifier_port.py
-│   │   ├── webpush_notifier.py
-│   │   └── discord_notifier.py
+│   │   ├── notifier_port.py      # Port + Notification/NotifyTargets/CompositeNotifier
+│   │   ├── webpush_notifier.py   # 기본 채널. 410/404 → 죽은 기기 보고 (D-20)
+│   │   ├── discord_notifier.py   # 보조 채널 (웹훅, opt-in 2단계)
+│   │   └── notify.py             # 채널 조립 + 대상 적재 + 죽은 기기 정리
 │   ├── scheduler/
-│   │   └── poller.py
+│   │   ├── poller.py             # ★ 폴링 사이클 (전부 now 주입 — 테스트 대상)
+│   │   └── service.py            # APScheduler 수명주기. 실제 시계를 읽는 유일한 지점
 │   └── storage/
 │       ├── db.py
+│       ├── creds.py              # Fernet — 코레일 비밀번호 + 디스코드 웹훅
+│       ├── push.py               # push_device (endpoint UPSERT + 죽은 기기 삭제)
+│       ├── stations.py
+│       ├── train_stops.py
+│       ├── matrix_cache.py       # 60초 TTL, 화면 전용 (D-17)
 │       └── migrations/
 ├── tests/
 │   ├── test_verdict.py       # ★ 핵심
 │   ├── test_matrix.py
 │   ├── test_alerts.py        # ★ 핵심 — 13절 케이스 5종 필수
+│   ├── test_scheduler.py     # ★ 핵심 — 배선 5종 (침묵/베이스라인/1건/멱등)
+│   ├── test_push_api.py      # 기기 등록 + 디스코드 opt-in 2단계
 │   ├── test_geo.py
 │   └── test_timeline.py      # 구간 추정 + 폴 포인터/grace
 └── web/                      # Vite + React
+    ├── public/               # Vite가 해시 없이 그대로 복사한다
+    │   ├── manifest.webmanifest
+    │   ├── sw.js             # 푸시 수신 + 딥링크 + 오프라인 셸 (/api는 캐시 금지)
+    │   └── icon-*.png        # scripts/gen_icons.py 생성
     └── src/
         ├── SeatMatrix.jsx
         ├── Login.jsx
-        └── Settings.jsx
+        ├── Settings.jsx
+        ├── StationPicker.jsx
+        └── push.js           # 구독. 권한 요청은 버튼 탭 핸들러에서만 (D-21)
 ```
 
 ## 16. Claude Code 시작 프롬프트
@@ -1825,3 +1862,63 @@ F. **PWA** — manifest + service worker + 푸시 수신 핸들러 + notificatio
   않아 새 클론에서 사라진다 — 훅을 레포에 두고 경로만 가리킨다.
 - 우회는 `git commit --no-verify`. 막을 수단은 아니고, 오탐일 때의 탈출구다.
 - 오탐 확인까지 검증했다 — 시크릿과 무관한 정상 커밋은 막지 않는다.
+
+### D-34. Phase 3 착수 시 문서가 침묵한 4개 지점 *(v11, Phase 3 구현 중)*
+
+Phase 3(알림 + 자동화)은 8·9절이 "무엇을 보낼지"를 이미 정해뒀지만, **배선에 필요한
+결정 4개가 문서에 없었다.** 임의 구현 대신 멈추고 합의했다 (CLAUDE.md 규칙).
+
+**① VAPID 키 = `.env` 3개 + 공개키만 API 노출**
+- 8절은 pywebpush를 전제하면서 키 관리·공개키 전달 경로를 말하지 않았다.
+  브라우저는 `pushManager.subscribe({applicationServerKey})`에 **공개키**가 필요하고,
+  서버는 발송에 **비밀키**가 필요하다.
+- 결정: `VAPID_PRIVATE_KEY` / `VAPID_PUBLIC_KEY` / `VAPID_SUBJECT`를 `.env`에.
+  공개키만 `GET /api/push/config`로 나간다. 생성은 `scripts/gen_vapid.py` (일회성).
+- **탈락한 안**: 첫 부팅에 자동 생성해 `app_setting`에 저장. 설정 파일을 손댈 일이
+  없어 편하지만 시크릿이 DB로 들어가 백업·이관 경로가 하나 더 생긴다. "시크릿은
+  `.env`로만"(절대규칙)이 이미 답을 정해뒀다.
+- **주의**: 키를 바꾸면 기존 `push_device` 등록이 전부 무효다 (브라우저 구독이 옛
+  공개키에 묶여 있다). 기기마다 알림을 다시 켜야 한다.
+- `VAPID_SUBJECT`는 훅의 `PUBLIC_KEYS`에 넣었다 — `mailto:` 연락처일 뿐 발송 권한이
+  아니고, 권한을 쥔 `VAPID_PRIVATE_KEY`는 목록에 없으므로 값이 채워지면 차단된다 (D-33).
+
+**② `fail_count` = FETCH_FAILED 게이트. 재시도 불가 실패도 같은 게이트로 1회 발송**
+- 5절 스키마에 `fail_count`가 있는데 8·9절은 쓰는 법을 말하지 않았다. 또 8절의
+  FETCH_FAILED 정의는 "30초×3 재시도 모두 실패"뿐인데, **재시도해도 같은 결과인
+  실패**(자격증명 미연동, 정차역 캐시 없음)는 그 정의에 해당하지 않는다.
+- 결정: 실패 시 `fail_count += 1`, 성공 시 `0`으로 리셋, **`0→1` 전이에서만 발송**.
+  이것이 "1회 발송 후 복구까지 재발송 없음"(8절)의 구현이다. 재시도 불가 실패도 같은
+  게이트로 1회 보낸다 — 안 보내면 알림이 조용히 죽은 것을 폰에서 알 방법이 없다.
+- 5종을 늘리지 않으므로 원인은 `fetch_failed_alert(reason=...)`로 **본문에** 담는다.
+  자격증명 미연동과 코레일 장애는 취할 행동이 전혀 다른데 둘 다 "갱신 실패"로만
+  오면 앱을 열어봐도 알 수 없다.
+- 리셋을 빼먹으면 다음 장애 때 FETCH_FAILED가 영구히 침묵한다 — 테스트로 잠갔다.
+
+**③ 만료 안전망 — 정차역을 모르면 지난 운행일 구독은 만료시킨다**
+- 9절의 "하차역 실효 도착시각 경과 시 `active = false`"는 `is_ride_over()`에 정차역이
+  필요하다. 그런데 korail2 어댑터는 캐시가 비면 `TrainStopsNotCached`를 던진다(D-29)
+  → **만료 판정 자체가 불가능해져 어제 구독이 영원히 후보로 남아 매 틱 실패한다.**
+- 결정: 정차역 해석 실패 + `date < 오늘`이면 만료. Phase 2에서 겪은 "지난 날짜 구독이
+  계속 살아나는" 문제(프론트의 "다른 열차" 탈출구로 임시 대응)를 여기서 닫는다.
+- 포인터가 빈(`next_poll_at IS NULL`) 구독도 틱 후보에 넣는다 — 마지막 폴 포인트를
+  지나면 포인터가 비는데, 그때 하차역 통과를 확인할 주체가 없으면 만료가 안 된다.
+
+**④ 알림 이력 테이블은 만들지 않는다**
+- 5절 스키마에 `alert` 테이블이 없고 `last_notified_at`만 있다. "오늘 뭐가 왔나"를
+  조회하려면 편하지만, 스키마 개정 + 조회 API + 화면이 줄줄이 따라온다.
+- 결정: 만들지 않는다. 8절 "늘리지 말 것" 정신에 맞추고 Phase 3 범위를 지킨다.
+  진단은 서버 로그(`TickReport`)로 한다. 실사용에서 정말 필요해지면 Phase 4.
+
+**부수 결정 — 발송 성공 여부와 상태 기록을 분리한다**
+- 발송에 실패해도 `last_verdict_hash`/`last_cells_snapshot`은 기록한다.
+  상태는 "관측한 것"이고 발송은 "알린 것"이라 섞으면 **발송 실패가 상태 오염으로
+  번진다.** 애초에 iOS는 배달 성공을 서버에 알려주지 않으므로 "발송 성공"이 신뢰
+  가능한 신호가 아니다 (8절이 폴백 방식을 거부한 것과 같은 이유).
+  `last_notified_at`만 실제로 한 채널이라도 받아들였을 때 기록한다.
+- 기기 미등록으로 알림이 새는 구멍은 `/api/push/test`가 막는다 (D-9).
+
+**부수 결정 — `NotifierPort`는 `Alert`가 아니라 `Notification`을 받는다**
+- `/api/push/test`의 생존 확인 핑은 **알림 종류가 아니다.** `Alert`로 감싸려면 5종 중
+  하나를 거짓으로 붙여야 하고, 그러면 "종류를 늘리지 말 것"이 다른 방식으로 무너진다.
+- 전송 계층은 `Notification(title, body, payload)`만 다루고, `Alert → Notification`
+  변환은 `adapters/notify.py`가 한다.
