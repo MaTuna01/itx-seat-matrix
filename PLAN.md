@@ -1069,6 +1069,78 @@ PLAN.md 11절 Phase 2(코레일 실연동)를 이어서 한다. **코드는 A~G 
 - Phase 3 영역(NotifierPort/웹푸시/디스코드/APScheduler 폴링/PWA service worker)은 만들지 않는다.
 ```
 
+### Phase 3 — 알림 + 자동화 *(다음 세션에서 이 블록을 그대로 붙여넣는다)*
+
+```
+PLAN.md 11절 Phase 3(알림 + 자동화)를 시작한다.
+Phase 2는 완료됐다 — 이슈 #5, PR #6, ADAPTER=korail2로 실제 매트릭스 조회 성공, pytest 279 통과.
+
+착수 전:
+1. PR #6이 dev에, dev가 main에 머지됐는지 확인해라. 안 됐으면 알려줘 — 머지는 내가 한다.
+2. feature 템플릿으로 새 이슈를 발급하고 dev에서 feat/<이름>으로 분기해라.
+   커밋만 하고 push는 내가 한다. 커밋 전 .env.example diff 확인은 pre-commit 훅이 대신한다 (D-33).
+
+## 이미 있는 것 — 다시 만들지 마라
+
+**판정 로직은 Phase 1에서 이미 끝났고 테스트도 통과한다.** Phase 3의 일은
+"무엇을 보낼지 결정하는 것"이 아니라 **그 결정을 스케줄러와 전송에 배선하는 것**이다:
+- `domain/alerts.py` — `evaluate()`(5종 판정 + 우선순위 합성 + 첫 폴링 베이스라인),
+  `verdict_hash()`, `count_extensions()`, `AlertConfig`. 테스트 15개 통과
+- `domain/timeline.py` — `compute_poll_points()`, `first_poll_at()`, `resolve_poll()`(grace 2분),
+  `is_ride_over()`
+- `adapters/seatmap_fetcher.py` — `fetch_matrix(cache=None, retry=SCHEDULER_RETRY)`가 스케줄러 경로다.
+  **cache를 넘기지 마라** — 캐시된 값으로 판정하면 상태 변화를 놓쳐 알림이 조용히 안 온다 (D-17).
+  이걸 지키는 회귀 테스트가 이미 있다
+- `subscription.next_poll_at` 컬럼, `last_verdict_hash`, `last_cells_snapshot` 컬럼
+
+`app/scheduler/`는 __init__.py만 있는 빈 패키지다. 여기가 이번 작업의 중심이다.
+
+## 착수 순서 (앞이 뒤의 전제다)
+
+A. **NotifierPort + 저장소.** `push_device` 테이블 신설(마이그레이션 006).
+   WebPushNotifier(기본, 항상 발송) + DiscordNotifier(웹훅, 연동+토글 둘 다 켰을 때만, D-11).
+   웹훅 URL은 사실상 자격증명이므로 Fernet 암호화 + API 미노출 (절대규칙 9, storage/creds.py 재사용).
+   410/404 응답이면 죽은 기기로 보고 삭제한다 — iOS는 endpoint를 조용히 회전시킨다 (D-20).
+B. **스케줄러 루프.** APScheduler 30초 틱. 하는 일은 하나다:
+   `next_poll_at <= now`인 활성 구독을 실행하고 포인터를 다음 포인트로 전진 (D-19).
+   `resolve_poll()`이 grace 2분 판정과 전진을 이미 해준다 — 시각 계산을 새로 짜지 마라.
+   **uvicorn --workers 1 고정** (2개면 알림이 중복 발사된다).
+C. **폴링 사이클 배선.** 조회 → `evaluate()` → 발송 → `last_verdict_hash`/`last_cells_snapshot` 기록.
+   **이 컬럼들을 쓰는 것은 스케줄러뿐이다** (절대규칙 5, D-13/D-17). /matrix는 지금도 안 건드린다.
+   조회 3회 실패 시 FETCH_FAILED 1회 발송 후 그 시점 포기하고 포인터 전진 (D-17).
+D. **구독 자동 만료.** 하차역 실효 도착시각 경과 시 active = false (9절).
+   `is_ride_over()`가 있다. **Phase 2에서 이게 없어 지난 날짜 구독이 계속 살아났다** —
+   프론트의 "다른 열차" 탈출구는 임시방편이었고 여기서 제대로 닫힌다.
+E. **/api/push/test** + 설정 화면의 알림 기기 등록 UI.
+   **푸시 권한 요청은 버튼 탭 핸들러 안에서만** — 페이지 로드 시 자동 요청은 iOS에서 조용히 실패한다 (D-21).
+F. **PWA** — manifest + service worker + 푸시 수신 핸들러 + notificationclick 매트릭스 딥링크 (D-20)
+   + 오프라인 캐시. 로컬 매트릭스 캐시는 이미 api.js에 있다.
+
+## 지킬 것
+
+- **실 코레일 API를 루프로 때리지 마라.** 스케줄러 개발·디버깅은 ADAPTER=mock으로 한다.
+  30초 틱이 실 API에 붙으면 호출 예절(10절)을 순식간에 넘긴다 — 이번 Phase에서 가장 위험한 지점이다.
+  시간은 now 주입으로 시나리오를 만들고 sleep/실제 시계를 쓰지 마라.
+- 알림 종류는 **5개로 고정**이다. 새 종류를 추가하지 않는다 (8절 "이것만. 늘리지 말 것").
+- 실 자격증명·우회 코드를 건드리는 스크립트는 네가 실행하지 말고 명령을 알려줘라.
+- 개발 DB(data/itx.db)를 삭제·초기화하지 마라. 계정이 들어 있고 가입이 잠겨 복구가 번거롭다.
+- 시크릿은 .env에만. 웹훅 URL은 DB에 Fernet으로.
+- PLAN.md와 충돌하거나 문서가 침묵하는 지점을 만나면 멈추고 보고해라. 합의된 변경은 본문 수정 + D-항목.
+
+## 테스트 (13절)
+
+`test_alerts.py`의 7개 케이스가 이 Phase의 핵심이다 — **침묵해야 할 때 침묵하는지**가 요점이다.
+이미 15개가 있으나 스케줄러 배선 후 다음이 추가로 잠겨야 한다:
+- 구간만 진행됐을 때(SEATED) 알림이 나가지 않는다
+- 하위 추천 순서만 바뀌었을 때 침묵한다
+- 첫 폴링은 항상 1건 발송한다 (베이스라인, 생존 확인)
+- 폴링 시점당 푸시는 최대 1건이다 (우선순위 합성)
+- 스케줄러 재시작 후 포인터에서 이어진다 (멱등)
+
+완료 기준: 탑승 등록 → 역 접근 시 자동 갱신 → [입석] 착석 가능 다이제스트 수신 /
+[착석] 내 자리 판매 시 폰에 알림 수신 → 앱에서 "이 자리에 앉음" → 이후 알림이 새 자리 기준으로 발송.
+```
+
 ---
 
 ## 17. 결정 이력 (Decision Log)
