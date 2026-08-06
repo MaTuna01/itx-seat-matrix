@@ -130,3 +130,66 @@ def test_put_korail_does_not_call_korail(client, monkeypatch) -> None:
     monkeypatch.setattr(requests.Session, "request", explode)
     res = client.put("/api/me/korail", json={"korail_id": KORAIL_ID, "korail_pw": KORAIL_PW})
     assert res.status_code == 200
+
+
+# ── SECRET_KEY 불일치 (Phase 4 배포 대비) ────────────────────────────
+# DB 파일만 옮기고 SECRET_KEY를 새로 만든 배포에서 반드시 발생한다.
+# 예외로 두면 스케줄러의 구독별 except에 잡혀 **알림이 조용히 끊긴다.**
+OTHER_KEY = "8xVXTPzGRhFyQmJ2kLpN7wCdE4sA6uB0iO1yZ3rT5nM="
+
+
+def _rekey(monkeypatch) -> None:
+    """암호화 후 키만 바꾼 상황을 만든다."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("SECRET_KEY", OTHER_KEY)
+    get_settings.cache_clear()
+
+
+def test_키가_바뀌면_자격증명은_None이다_예외가_아니다(client, monkeypatch):
+    from app.storage.creds import load_korail_cred
+    from app.storage.db import connect, db_path
+
+    client.put("/api/me/korail", json={"korail_id": KORAIL_ID, "korail_pw": KORAIL_PW})
+    path = db_path()
+    _rekey(monkeypatch)
+
+    conn = connect(path)
+    try:
+        assert load_korail_cred(conn, 1) is None
+    finally:
+        conn.close()
+
+
+def test_키가_바뀌면_화면에_미연결로_보인다(client, monkeypatch):
+    """「연결됨」인데 조회는 실패하는 상태가 가장 나쁘다 — 원인을 짚을 방법이 없다."""
+    client.put("/api/me/korail", json={"korail_id": KORAIL_ID, "korail_pw": KORAIL_PW})
+    assert client.get("/api/me").json()["korail_linked"] is True
+
+    _rekey(monkeypatch)
+    assert client.get("/api/me").json()["korail_linked"] is False
+
+
+def test_키가_바뀌면_디스코드도_미연동으로_보인다(client, monkeypatch):
+    from app.adapters.notifier_port import NotifyResult
+    from app.adapters.discord_notifier import DiscordNotifier
+
+    async def ok(self, url: str, content: str) -> NotifyResult:
+        return NotifyResult(sent=1)
+
+    monkeypatch.setattr(DiscordNotifier, "post", ok)
+    client.put("/api/me/discord", json={"webhook_url": "https://discord.com/api/webhooks/1/x"})
+    assert client.get("/api/me").json()["discord_linked"] is True
+
+    _rekey(monkeypatch)
+    assert client.get("/api/me").json()["discord_linked"] is False
+
+
+def test_다시_등록하면_복구된다(client, monkeypatch):
+    """키가 어긋나도 화면에서 다시 입력하면 새 키로 재암호화돼 정상화된다."""
+    client.put("/api/me/korail", json={"korail_id": KORAIL_ID, "korail_pw": KORAIL_PW})
+    _rekey(monkeypatch)
+    assert client.get("/api/me").json()["korail_linked"] is False
+
+    client.put("/api/me/korail", json={"korail_id": KORAIL_ID, "korail_pw": KORAIL_PW})
+    assert client.get("/api/me").json()["korail_linked"] is True

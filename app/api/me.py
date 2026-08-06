@@ -17,6 +17,8 @@ from app.domain.models import KorailCred, User
 from app.storage.creds import (
     clear_discord_webhook,
     clear_korail_cred,
+    discord_linked,
+    korail_linked,
     save_discord_webhook,
     save_korail_cred,
     set_discord_enabled,
@@ -136,17 +138,18 @@ def get_me(
 
 
 def _me(conn: sqlite3.Connection, user: User) -> MeOut:
-    row = conn.execute(
-        "SELECT korail_id, korail_pw_enc, discord_webhook_enc, discord_enabled"
-        " FROM user WHERE id = ?",
-        (user.id,),
-    ).fetchone()
+    """`*_linked`는 **복호화까지 되는지**로 판단한다 (storage/creds.korail_linked).
+
+    행에 암호문이 있다는 것만 보면, `SECRET_KEY`가 어긋난 순간부터 화면은 "연결됨"인데
+    조회는 계속 실패하는 상태가 된다 — 사용자가 원인을 짚을 방법이 없다.
+    """
+    row = conn.execute("SELECT discord_enabled FROM user WHERE id = ?", (user.id,)).fetchone()
     return MeOut(
         id=user.id,
         email=user.email,
         display_name=user.display_name,
         is_admin=user.is_admin,
-        korail_linked=bool(row["korail_id"] and row["korail_pw_enc"]),
-        discord_linked=bool(row["discord_webhook_enc"]),
+        korail_linked=korail_linked(conn, user.id),
+        discord_linked=discord_linked(conn, user.id),
         discord_enabled=bool(row["discord_enabled"]),
     )

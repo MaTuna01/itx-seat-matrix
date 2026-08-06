@@ -600,3 +600,46 @@ async def test_알림_payload에_매트릭스_딥링크가_있다(db):
     payload = spy.notes[0].payload
     assert payload["subscription_id"] == sub_id
     assert payload["url"] == f"/?sub={sub_id}"
+
+
+# ── SECRET_KEY 불일치 시 침묵하지 않는다 (Phase 4 배포 대비) ─────────
+async def test_자격증명_복호화_실패는_조용히_끊기지_않는다(db):
+    """★ DB만 옮기고 SECRET_KEY를 새로 만든 배포에서 반드시 발생하는 경로.
+
+    복호화가 예외로 올라오면 구독별 `except Exception`에 잡혀 서버 로그 한 줄만 남고
+    **폰에서는 알림이 그냥 끊긴 것처럼 보인다.** None으로 떨어뜨려 기존 미연동 경로를
+    타게 하면 FETCH_FAILED가 1회라도 나간다.
+
+    구간 1개(영등포→서울)로 좁혀 호출 수를 결정적으로 만든다.
+    """
+    from app.adapters.korail2_adapter import CredentialsRequired
+
+    class CredRequiringPort(FakePort):
+        """자격증명 없이는 좌석맵을 못 주는 실제 korail2 어댑터의 행동."""
+
+        async def get_seat_map(self, cred, train_no, d, frm, to):
+            self.seat_map_calls.append((frm, to))
+            if cred is None:
+                raise CredentialsRequired("코레일 계정을 먼저 연결하세요")
+            return await super().get_seat_map(cred, train_no, d, frm, to)
+
+    # 다른 키로 암호화된 것처럼 깨진 암호문을 심는다
+    db.execute(
+        "UPDATE user SET korail_id = 'someone', korail_pw_enc = 'gAAAAABnot-a-valid-token'"
+        " WHERE id = 1"
+    )
+    port, spy = CredRequiringPort(cells()), SpyNotifier()
+    deps = deps_for(db, port, spy)
+    sub_id = make_sub(
+        db, status="STANDING", board_at="영등포", alight_at="서울", next_poll_at=at(8, 38)
+    )
+
+    report = await run_tick(deps, now=at(8, 38))
+
+    assert spy.kinds == ["FETCH_FAILED"], f"조용히 끊겼다: {spy.kinds}"
+    assert report.polled == []
+    # CredentialsRequired는 ValueError 계열이라 재시도하지 않는다 —
+    # 30초×3을 기다려도 같은 답이다 (재시도했다면 3회가 찍힌다)
+    assert len(port.seat_map_calls) == 1
+    # 포인터는 전진한다 (그 시점 포기, D-17)
+    assert row_of(db, sub_id)["next_poll_at"] == to_db(at(8, 44))
