@@ -18,9 +18,14 @@
 | **Intel iMac** (x86_64) | **`data/itx.db` 원본 제공 — 이것만** | 실 코레일 자격증명과 푸시 기기 등록이 이 DB에만 있다 |
 | **EC2 t4g.nano** (Ubuntu 24.04 LTS, arm64) | 실행 | 24시간 깨어 있어야 30초 틱이 멈추지 않는다 (Phase 3이 열린 채로 남은 이유). SSH 사용자는 `ubuntu` (D-42) |
 
-**아이맥에서 사람이 해야 하는 일은 "서버를 내리는 것" 하나뿐이다.** DB는 M4에서 ssh 한 줄로
-뽑아온다(5절). `.env`는 아이맥에서 긁어오지 않고 **별도 보관본(노션 등)에서 손으로 만든다**(4절) —
-대신 `SECRET_KEY` 지문을 대조해야 한다. 저장소는 M4에서 새로 clone한다.
+**작업은 M4에서 하고, 아이맥 앞에는 5절(DB 이관) 때 한 번만 앉는다.** 저장소는 M4에서 새로
+clone하고, `.env`는 아이맥에서 긁어오지 않고 **별도 보관본(노션 등)에서 손으로 만든다**(4절) —
+대신 `SECRET_KEY` 지문을 대조해야 한다.
+
+> **M4에서 `ssh imac`은 안 된다.** macOS는 Tailscale SSH의 **서버가 될 수 없고**(리눅스 전용),
+> 맥의 "원격 로그인"을 켜지 않았다면 tailnet 안에서도 22번이 닫혀 있다. 그래서 DB는 아이맥이
+> **클라이언트가 되어 EC2로 직접 밀어 넣는다** (5절 ②). EC2는 리눅스라 Tailscale SSH가 되므로
+> M4·아이맥 → EC2 방향은 전부 열려 있다.
 
 > **Intel iMac에서 배포 이미지를 빌드하지 마라.** `--platform linux/arm64`를 빠뜨리면 x86
 > 이미지가 나와 EC2에서 `exec format error`로 죽고(12절이 경고하는 함정), 붙여도 QEMU
@@ -254,12 +259,16 @@ EOF
 `scripts/env_fingerprint.sh`가 **값을 노출하지 않고** 12자 지문만 출력한다. 양쪽에서 돌린다:
 
 ```bash
-# 원본 — 아이맥. ssh 로 붙어서 돌려도 된다 (출력에 값은 없다)
-ssh imac 'cd ~/itx-seat-matrix && scripts/env_fingerprint.sh'
+# 원본 — 아이맥의 터미널에서 (출력에 값은 없다. 12자를 눈으로 옮겨 적으면 된다)
+cd ~/itx-seat-matrix && scripts/env_fingerprint.sh
 
-# 사본 — 방금 만든 배포용
+# 사본 — M4에서, 방금 만든 배포용
 scripts/env_fingerprint.sh ~/itx-prod.env
 ```
+
+> **`ssh imac`으로 원격 실행하려 하지 마라.** macOS는 Tailscale SSH의 **서버가 될 수 없고**
+> (리눅스 전용이다), 맥의 "원격 로그인"을 따로 켜지 않았다면 tailnet 안에서도 22번이 닫혀 있다.
+> 아이맥 앞에 앉아서 돌리는 게 정답이다 — 어차피 12자 다섯 줄이다.
 
 **두 출력의 12자가 전부 일치해야 한다.** 하나라도 다르면 그 키를 다시 옮긴다.
 `(빈 값)`이 보이면 붙여넣기가 실패한 것이다. `KORAIL_*` 경고가 나오면 그 줄을 지운다.
@@ -294,7 +303,7 @@ DB는 **WAL 모드**다 (`app/storage/db.py`가 `PRAGMA journal_mode = WAL`). �
 
 `.backup`을 쓴다. WAL을 포함해 일관된 단일 파일을 만들어 준다.
 
-### ① 아이맥 서버를 내린다 — 여기서 사람이 아이맥에 손대는 건 이것뿐
+### ① 아이맥 서버를 내린다
 
 **이 시점부터 EC2가 원본이 된다.** 백업을 뜬 뒤 아이맥에서 등록한 것(새 푸시 기기,
 자격증명 변경)은 EC2에 없고, 두 DB가 갈라진다. 그래서 먼저 내린다:
@@ -307,36 +316,39 @@ pgrep -fl 'uvicorn app.main'      # 남아 있으면 kill
 `.backup`은 라이브 DB에도 쓸 수 있지만, 내려두면 "백업 이후에 뭐가 더 들어갔나"를
 생각할 필요가 없어진다.
 
-### ② M4에서 ssh로 뽑아온다 — 아이맥에 앉을 필요는 없다
+### ② 아이맥에서 EC2로 **직접** 보낸다 — M4를 거치지 않는다
+
+★ **M4에서 `ssh imac`으로 뽑아오려 하지 마라.** macOS는 Tailscale SSH의 **서버가 될 수 없다**
+(리눅스 전용). 맥의 "원격 로그인"을 켜지 않았다면 tailnet 안에서도 22번이 닫혀 있고, 켜더라도
+사용자명이 기기마다 달라 `ssh imac`이 아니라 `ssh <아이맥계정>@imac`이어야 한다.
+
+거꾸로 하면 문제가 사라진다. **EC2는 리눅스라 Tailscale SSH가 되므로, 아이맥이 클라이언트가
+되어 EC2로 밀어 넣으면 된다** — 중간 경유도, 원격 로그인도 필요 없다. (그래서 이 절만은
+아이맥 앞에서 하고, **3절까지 끝나 `itx` 노드가 살아 있어야 한다.**)
 
 ```bash
-# M4에서. sqlite3 는 macOS 기본 탑재다
-ssh imac 'cd ~/itx-seat-matrix && sqlite3 data/itx.db ".backup \"/tmp/itx-migrate.db\""'
+# 아이맥에서. sqlite3 는 macOS 기본 탑재다
+cd ~/itx-seat-matrix
+sqlite3 data/itx.db ".backup '/tmp/itx-migrate.db'"
 
-# sqlite3 CLI가 없거나 위 인용이 꼬이면 파이썬으로 (동일한 온라인 백업 API를 쓴다)
-#   ssh imac 'cd ~/itx-seat-matrix && uv run python -c "import sqlite3
-#   s=sqlite3.connect(\"data/itx.db\"); d=sqlite3.connect(\"/tmp/itx-migrate.db\")
-#   s.backup(d); d.close(); s.close()"'
+# sqlite3 CLI가 없으면 파이썬으로 (동일한 온라인 백업 API를 쓴다)
+#   uv run python -c "import sqlite3; s=sqlite3.connect('data/itx.db'); d=sqlite3.connect('/tmp/itx-migrate.db'); s.backup(d); d.close(); s.close()"
 
-scp imac:/tmp/itx-migrate.db ~/itx-migrate.db
-ssh imac 'rm -P /tmp/itx-migrate.db'      # 원본 흔적을 남기지 않는다
-```
-
-### ③ 내용을 확인하고 EC2로 보낸다
-
-```bash
-# M4에서. user/subscription/station/train_stop/push_device 가 다 있어야 한다
-sqlite3 ~/itx-migrate.db "select 'user',count(*) from user union all
+# 내용 확인 — user/subscription/station/train_stop/push_device 가 다 있어야 한다
+sqlite3 /tmp/itx-migrate.db "select 'user',count(*) from user union all
   select 'subscription',count(*) from subscription union all
   select 'station',count(*) from station union all
   select 'train_stop',count(*) from train_stop union all
   select 'push_device',count(*) from push_device;"
 
-scp ~/itx-migrate.db ubuntu@itx:~/itx-seat-matrix/data/itx.db
+# EC2로 직접 전송
+scp /tmp/itx-migrate.db ubuntu@itx:~/itx-seat-matrix/data/itx.db
 ```
 
-> `~/itx-migrate.db`는 **7·8절 검증이 끝날 때까지 지우지 마라** — 유일한 롤백이다.
-> 끝나면 지운다(`rm -P`). 코레일 자격증명이 든 파일이니 사본을 여기저기 흘리지 마라.
+> `/tmp/itx-migrate.db`는 **7·8절 검증이 끝날 때까지 지우지 마라** — 유일한 롤백이다.
+> 끝나면 지운다(`rm -P /tmp/itx-migrate.db`). 코레일 자격증명이 든 파일이니 사본을
+> 여기저기 흘리지 마라. (재부팅하면 `/tmp`가 비워질 수 있으니, 검증까지 시간이 걸릴 것 같으면
+> 홈 디렉터리에 두는 편이 낫다.)
 
 **서버에서:**
 
@@ -438,7 +450,16 @@ M4·iMac 브라우저에서 `https://itx.tail9115e9.ts.net` → 로그인 화면
 **두 서버가 동시에 살아 있을 수 있는 유일한 구간**이므로 한 번 더 본다:
 
 ```bash
-ssh imac "pgrep -fl 'uvicorn app.main'"     # 아무것도 안 나와야 한다
+# 아이맥에서 (M4에서 ssh 로 확인할 수는 없다 — 0절 주의 참조)
+pgrep -fl 'uvicorn app.main'     # 아무것도 안 나와야 한다
+```
+
+아이맥의 `tailscale serve`도 이때 정리하면 헷갈리지 않는다. 앱이 내려간 뒤에도 설정은 남아
+있어서 `https://imac.…`가 **502를 돌려주는 상태**가 되기 때문이다:
+
+```bash
+# 아이맥에서. 개발 중에 다시 필요하면 그때 켠다
+sudo tailscale serve --https=443 off
 ```
 
 DB를 복사해 왔으므로 `push_device`·`subscription` 행이 **양쪽에 똑같이 있다.**
