@@ -20,7 +20,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from app.domain.models import Alert
+
+@dataclass(frozen=True)
+class Notification:
+    """전송 계층이 다루는 최소 단위 — 제목·본문·payload.
+
+    `Alert`(5종 고정)를 그대로 받지 않는 이유: `/api/push/test`의 생존 확인 핑은
+    **알림 종류가 아니다.** Alert로 감싸려면 5종 중 하나를 거짓으로 붙여야 하고,
+    그러면 "종류를 늘리지 말 것"(8절)이 다른 방식으로 무너진다.
+    변환은 `adapters/notify.py`가 한다.
+    """
+
+    title: str
+    body: str
+    payload: dict
 
 
 @dataclass(frozen=True)
@@ -72,10 +85,10 @@ class NotifyResult:
 
 @runtime_checkable
 class NotifierPort(Protocol):
-    async def send(self, alert: Alert, targets: NotifyTargets, *, payload: dict) -> NotifyResult:
-        """`alert`를 이 채널로 보낸다. **예외를 던지지 않는다** (`NotifyResult.errors`에 담는다).
+    async def send(self, note: Notification, targets: NotifyTargets) -> NotifyResult:
+        """이 채널로 한 건 보낸다. **예외를 던지지 않는다** (`NotifyResult.errors`에 담는다).
 
-        `payload`는 웹푸시 본문에 그대로 실리는 JSON이다 (딥링크 정보 포함, D-20).
+        `note.payload`는 웹푸시 본문에 그대로 실리는 JSON이다 (딥링크 정보 포함, D-20).
         디스코드처럼 payload가 필요 없는 채널은 무시한다.
         """
         ...
@@ -90,8 +103,8 @@ class CompositeNotifier:
     def __init__(self, notifiers: tuple[NotifierPort, ...]) -> None:
         self._notifiers = notifiers
 
-    async def send(self, alert: Alert, targets: NotifyTargets, *, payload: dict) -> NotifyResult:
+    async def send(self, note: Notification, targets: NotifyTargets) -> NotifyResult:
         result = NotifyResult()
         for notifier in self._notifiers:
-            result = result.merge(await notifier.send(alert, targets, payload=payload))
+            result = result.merge(await notifier.send(note, targets))
         return result

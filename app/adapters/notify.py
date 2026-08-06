@@ -10,9 +10,15 @@ api(`/api/push/test`)와 scheduler 양쪽이 이 모듈을 쓴다.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 
 from app.adapters.discord_notifier import DiscordNotifier
-from app.adapters.notifier_port import CompositeNotifier, NotifyResult, NotifyTargets
+from app.adapters.notifier_port import (
+    CompositeNotifier,
+    Notification,
+    NotifyResult,
+    NotifyTargets,
+)
 from app.adapters.webpush_notifier import WebPushNotifier
 from app.config import Settings, get_settings
 from app.domain.models import Alert
@@ -52,25 +58,54 @@ def load_targets(conn: sqlite3.Connection, user_id: int) -> NotifyTargets:
     )
 
 
-def alert_payload(alert: Alert) -> dict:
-    """service worker가 받는 JSON. `url`이 알림 탭 → 매트릭스 딥링크다 (D-20).
+def _deep_link(subscription_id: int | None) -> str:
+    """알림 탭 → 매트릭스 딥링크 (D-20).
 
-    "알림은 앱을 열 시점을 알리는 장치"(D-2/D-9)의 마지막 연결 고리 —
-    탭했을 때 매트릭스가 아니라 홈으로 떨어지면 알림의 절반이 무용해진다.
+    "알림은 앱을 열 시점을 알리는 장치"(D-2/D-9)의 마지막 연결 고리 — 탭했을 때
+    매트릭스가 아니라 홈으로 떨어지면 알림의 절반이 무용해진다.
     """
-    return {
-        "kind": alert.kind.value,
-        "title": alert.title,
-        "body": alert.body,
-        "subscription_id": alert.subscription_id,
-        "url": f"/?sub={alert.subscription_id}",
-    }
+    return f"/?sub={subscription_id}" if subscription_id else "/"
 
 
-async def deliver(
+def notification_of(alert: Alert) -> Notification:
+    """`Alert`(도메인 결정) → `Notification`(전송 단위)."""
+    return Notification(
+        title=alert.title,
+        body=alert.body,
+        payload={
+            "kind": alert.kind.value,
+            "title": alert.title,
+            "body": alert.body,
+            "subscription_id": alert.subscription_id,
+            "url": _deep_link(alert.subscription_id),
+        },
+    )
+
+
+def test_notification(*, now: datetime, subscription_id: int | None = None) -> Notification:
+    """`POST /api/push/test`의 생존 확인 핑 (PLAN 7절 주석, D-9).
+
+    알림 종류가 아니므로 `kind`를 붙이지 않는다 (8절 5종 고정). iOS 웹푸시는 조용히
+    실패하는 일이 잦아 **상시 점검 수단**이 필요하다 — 그게 이 엔드포인트의 전부다.
+    시각을 본문에 넣는 이유: 옛 알림이 남아 있는 것과 방금 도착한 것을 눈으로 구분한다.
+    """
+    return Notification(
+        title="알림 테스트",
+        body=f"이 알림이 보이면 푸시가 살아 있습니다 · {now:%H:%M:%S}",
+        payload={
+            "kind": "TEST",
+            "title": "알림 테스트",
+            "body": f"이 알림이 보이면 푸시가 살아 있습니다 · {now:%H:%M:%S}",
+            "subscription_id": subscription_id,
+            "url": _deep_link(subscription_id),
+        },
+    )
+
+
+async def send_note(
     conn: sqlite3.Connection,
     user_id: int,
-    alert: Alert,
+    note: Notification,
     *,
     notifier: CompositeNotifier | None = None,
 ) -> NotifyResult:
@@ -80,8 +115,18 @@ async def deliver(
     나중에 정리하는 별도 잡을 두면 그 사이 발송이 계속 에러를 뿜는다.
     """
     notifier = notifier or build_notifier()
-    targets = load_targets(conn, user_id)
-    result = await notifier.send(alert, targets, payload=alert_payload(alert))
+    result = await notifier.send(note, load_targets(conn, user_id))
     if result.dead_device_ids:
         push_repo.delete_dead(conn, result.dead_device_ids)
     return result
+
+
+async def deliver(
+    conn: sqlite3.Connection,
+    user_id: int,
+    alert: Alert,
+    *,
+    notifier: CompositeNotifier | None = None,
+) -> NotifyResult:
+    """스케줄러가 부르는 경로 — 도메인이 결정한 `Alert` 한 건을 발송한다."""
+    return await send_note(conn, user_id, notification_of(alert), notifier=notifier)

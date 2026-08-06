@@ -15,8 +15,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from app.adapters.notifier_port import NotifyResult, NotifyTargets
-from app.domain.models import Alert
+from app.adapters.notifier_port import Notification, NotifyResult, NotifyTargets
 
 # 디스코드는 성공 시 204(또는 wait=true일 때 200)를 준다.
 # 401/403/404 = 웹훅이 지워졌거나 URL이 틀렸다 — 재시도해도 같다.
@@ -37,11 +36,11 @@ class DiscordNotifier:
     def __init__(self, config: DiscordConfig = DEFAULT_DISCORD) -> None:
         self._config = config
 
-    async def send(self, alert: Alert, targets: NotifyTargets, *, payload: dict) -> NotifyResult:
+    async def send(self, note: Notification, targets: NotifyTargets) -> NotifyResult:
         webhook = targets.discord_webhook
         if not webhook:
             return NotifyResult()  # 미연동/토글 off — 침묵이 정상이다. 에러가 아니다
-        return await self.post(webhook, f"**{alert.title}**\n{alert.body}")
+        return await self.post(webhook, f"**{note.title}**\n{note.body}")
 
     async def post(self, webhook_url: str, content: str) -> NotifyResult:
         """웹훅에 한 건 보낸다. `PUT /api/me/discord`의 URL 검증도 이 경로를 쓴다 (8절).

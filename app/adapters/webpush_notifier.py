@@ -17,8 +17,7 @@ from dataclasses import dataclass
 
 from pywebpush import WebPushException, webpush
 
-from app.adapters.notifier_port import NotifyResult, NotifyTargets, PushTarget
-from app.domain.models import Alert
+from app.adapters.notifier_port import Notification, NotifyResult, NotifyTargets, PushTarget
 
 # 브라우저 푸시 서비스가 "이 기기 구독은 이제 없다"고 답하는 코드.
 # 그 외 4xx/5xx는 일시적 장애로 보고 기기를 남긴다 — 살아 있는 기기를 지우면
@@ -55,14 +54,14 @@ class WebPushNotifier:
         self._subject = subject
         self._config = config
 
-    async def send(self, alert: Alert, targets: NotifyTargets, *, payload: dict) -> NotifyResult:
+    async def send(self, note: Notification, targets: NotifyTargets) -> NotifyResult:
         if not self._private_key:
             # 설정 누락은 조용히 넘기면 안 된다 — 알림이 안 오는 이유가 여기 있다.
             return NotifyResult(errors=("웹푸시 VAPID 키가 설정되지 않았다 (.env)",))
         if not targets.devices:
             return NotifyResult(errors=("등록된 알림 기기가 없다",))
 
-        body = json.dumps(payload, ensure_ascii=False)
+        body = json.dumps(note.payload, ensure_ascii=False)
         results = await asyncio.gather(
             *(self._send_one(device, body) for device in targets.devices)
         )
