@@ -295,10 +295,14 @@ class TestMatrix:
         assert verdict["my_seat_sold_from"] == "천안"
         # SEATED는 동률이면 내 호차(3호차) 근접순 → 4-1B보다 3-8B가 먼저다
         assert verdict["move_to"][0] == {
-            "car": 3, "seat_no": "8B", "clear_until_idx": 5, "clear_all": True,
+            # clear_from_idx: 지금(실효 시작 0)부터 앉을 수 있다는 뜻 (→ D-46)
+            "car": 3, "seat_no": "8B", "clear_from_idx": 0, "clear_until_idx": 5,
+            "clear_all": True,
         }
         # 하차역까지 비는 좌석은 이 둘뿐이다 (clear_all 좌석이 있으면 그것만 추천)
         assert [f"{r['car']}-{r['seat_no']}" for r in verdict["move_to"]] == ["3-8B", "4-1B"]
+        # 지금 앉을 수 있는 좌석이 있으므로 지연 착석 목록은 별도로 유지된다 (합치지 않는다)
+        assert "move_to_later" in verdict
         assert body["next_poll"] == {"station": "천안", "offset_min": 10}
 
     def test_좌석_미지정이면_입석_관점_판정(self, client):

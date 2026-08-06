@@ -8,7 +8,13 @@
 from __future__ import annotations
 
 from app.domain.models import SubscriptionStatus
-from app.domain.verdict import RankingConfig, build_verdict, clear_until
+from app.domain.verdict import (
+    DEFAULT_RANKING,
+    RankingConfig,
+    build_verdict,
+    clear_until,
+    longest_free_run,
+)
 from tests.conftest import make_matrix
 
 SEATED = SubscriptionStatus.SEATED
@@ -230,13 +236,103 @@ class Test시작_구간만_매진일_때:
         v = self._verdict({"4-1A": [F, T, T], "5-2A": [F, T, T]}, current_seg_idx=1)
         assert v.all_sold_after_current is True
 
-    def test_추천은_아직_비어_있다(self):
-        """현재 동작을 못 박아둔다 — 지연 착석 추천(별도 이슈)이 들어오면 여기가 바뀐다.
-
-        추천 대상은 `clear_until_idx > start_idx`로 제한돼 있어 "지금 당장" 앉을 수 있는
-        좌석만 나온다. 매진 판정과 달리 이쪽은 **설계 공백**이라 임의로 바꾸지 않는다.
-        """
+    def test_지금_앉을_좌석은_없고_지연_착석만_나온다(self):
+        """퇴근길의 본론 (→ D-46). 지금 앉을 자리는 없지만 수원부터는 있다."""
         v = self._verdict({"4-1A": [T, F, F], "5-2A": [T, T, T]})
-        assert v.move_to == []
-        # 다만 매진은 아니므로 화면은 "일부 구간만 착석 가능"으로 떨어진다
+        assert v.move_to == []  # "지금 앉을 수 있는" 목록은 비어 있다 — 사실이다
         assert v.all_sold_after_current is False
+        assert len(v.move_to_later) == 1
+        rec = v.move_to_later[0]
+        assert (rec.car, rec.seat_no) == (4, "1A")
+        assert rec.clear_from_idx == 1  # 수원부터
+        assert rec.clear_until_idx == 3  # 천안까지
+        assert rec.clear_all is True  # 그 시점부터 하차역까지 계속
+
+
+class Test지연_착석_추천:
+    """지금은 못 앉지만 몇 정거장 뒤부터 앉을 수 있는 좌석 (→ D-46)."""
+
+    RETURN_STOPS = ["영등포", "수원", "평택", "천안"]
+
+    def _verdict(self, seats: dict[str, list[bool]], **kw):
+        return build_verdict(
+            matrix=make_matrix(seats, stops=self.RETURN_STOPS),
+            status=kw.pop("status", STANDING),
+            board_idx=0,
+            alight_idx=3,
+            current_seg_idx=0,
+            **kw,
+        )
+
+    def test_가장_긴_연속_구간이_위다(self):
+        v = self._verdict({"4-1A": [T, T, F], "4-1B": [T, F, F]})
+        # 4-1B는 수원부터 2구간, 4-1A는 평택부터 1구간
+        assert [(r.car, r.seat_no) for r in v.move_to_later] == [(4, "1B"), (4, "1A")]
+
+    def test_길이가_같으면_일찍_앉을_수_있는_쪽이_위다(self):
+        """멀리 있는 구간일수록 그때까지 남아 있을 가능성이 낮다."""
+        v = self._verdict({"4-1A": [T, T, F], "4-1B": [T, F, T]})
+        # 둘 다 1구간 — 4-1B는 수원부터, 4-1A는 평택부터
+        assert [(r.car, r.seat_no) for r in v.move_to_later] == [(4, "1B"), (4, "1A")]
+
+    def test_지금_앉을_수_있는_좌석과_섞이지_않는다(self):
+        """합치면 1순위가 '지금 못 앉는 자리'가 될 수 있다 — 두 목록을 유지하는 이유다."""
+        v = self._verdict({"4-1A": [F, T, T], "4-1B": [T, F, F]})
+        # 4-1A: 지금부터 1구간 / 4-1B: 수원부터 2구간 (더 길다)
+        assert [(r.car, r.seat_no) for r in v.move_to] == [(4, "1A")]
+        assert [(r.car, r.seat_no) for r in v.move_to_later] == [(4, "1B")]
+        assert v.move_to[0].clear_from_idx == 0  # 지금
+
+    def test_끝까지_매진인_좌석은_어느_목록에도_없다(self):
+        v = self._verdict({"5-2A": [T, T, T]})
+        assert v.move_to == []
+        assert v.move_to_later == []
+        assert v.all_sold_after_current is True
+
+    def test_내_좌석은_추천에서_빠진다(self):
+        v = self._verdict(
+            {"4-1A": [T, F, F], "3-7A": [T, F, F]},
+            status=SEATED, my_car=3, my_seat_no="7A",
+        )
+        assert [(r.car, r.seat_no) for r in v.move_to_later] == [(4, "1A")]
+
+    def test_지나온_구간의_빈자리는_세지_않는다(self):
+        """실효 시작 이전은 관심 밖이다 (D-18)."""
+        v = build_verdict(
+            matrix=make_matrix({"4-1A": [F, T, F]}, stops=self.RETURN_STOPS),
+            status=STANDING, board_idx=0, alight_idx=3, current_seg_idx=1,
+        )
+        # 실효 시작 = 수원(1). 영등포-수원의 빈자리는 무관하고, 평택부터 1구간만 남는다
+        assert v.move_to == []
+        assert [r.clear_from_idx for r in v.move_to_later] == [2]
+
+    def test_상한을_넘지_않는다(self):
+        seats = {f"4-{i}A": [T, F, F] for i in range(1, 7)}
+        v = self._verdict(seats)
+        assert len(v.move_to_later) == DEFAULT_RANKING.max_recommendations
+
+
+class TestLongestFreeRun:
+    """`longest_free_run` 단위 (→ D-46). 인덱스 경계가 조용히 틀리기 쉬운 자리다."""
+
+    def test_빈_구간이_없으면_길이_0(self):
+        assert longest_free_run([T, T, T], 0, 3) == (0, 0)
+
+    def test_전_구간이_비면_전체(self):
+        assert longest_free_run([F, F, F], 0, 3) == (0, 3)
+
+    def test_뒤쪽_구간(self):
+        assert longest_free_run([T, F, F], 0, 3) == (1, 3)
+
+    def test_더_긴_쪽을_고른다(self):
+        assert longest_free_run([F, T, F, F], 0, 4) == (2, 4)
+
+    def test_길이가_같으면_이른_쪽(self):
+        assert longest_free_run([F, T, F], 0, 3) == (0, 1)
+
+    def test_시작_이전은_보지_않는다(self):
+        assert longest_free_run([F, F, T, F], 2, 4) == (3, 4)
+
+    def test_하차_이후는_보지_않는다(self):
+        # 구간 3(영등포-서울)이 비어 있어도 안양에서 내리면 무관하다
+        assert longest_free_run([T, F, T, F], 0, 3) == (1, 2)

@@ -7,7 +7,9 @@
 // 이 앱에서 가장 위험한 실패다 (D-17). 열차 안 회선 끊김 대응은 api.js 의
 // localStorage 매트릭스 캐시가 담당하고, 그쪽은 "언제 받은 값인지"를 화면에 표시한다.
 
-const CACHE = "itx-shell-v1";
+// v2: 판정 요약에 지연 착석 그룹이 추가됐다 (D-46). 올리지 않으면 홈화면 PWA가
+// 앱을 완전히 종료할 때까지 옛 화면을 계속 보여준다.
+const CACHE = "itx-shell-v2";
 const SHELL = "/";
 
 self.addEventListener("install", (event) => {
