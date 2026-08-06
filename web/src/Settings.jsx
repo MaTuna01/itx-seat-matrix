@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
+import {
+  guessDeviceLabel,
+  pushBlockedReason,
+  subscribeThisDevice,
+  unsubscribeThisDevice,
+} from "./push";
 import { st } from "./styles";
 
-// 설정 화면 (PLAN 10절). 계정/가입 관리 + 코레일 연동 (Phase 2).
-// 알림 기기·디스코드 웹훅은 Phase 3에서 여기에 붙는다.
+// 설정 화면 (PLAN 10절). 계정/가입 관리 + 코레일 연동 + 알림 기기·디스코드 (Phase 3).
 export default function Settings({ user, onBack, onLoggedOut, onUserChange }) {
   const [signupEnabled, setSignupEnabled] = useState(null);
   const [error, setError] = useState(null);
@@ -45,6 +50,8 @@ export default function Settings({ user, onBack, onLoggedOut, onUserChange }) {
         </p>
 
         <KorailLink user={user} onUserChange={onUserChange} setError={setError} />
+        <PushDevices setError={setError} />
+        <DiscordLink user={user} onUserChange={onUserChange} setError={setError} />
 
         {user.is_admin && (
           <>
@@ -160,6 +167,196 @@ function KorailLink({ user, onUserChange, setError }) {
       <p style={{ ...st.dim, marginTop: 8 }}>
         암호화해서 저장하며 다시 표시되지 않습니다. 연결 시점에는 코레일에 접속하지
         않으므로, 아이디·비밀번호가 틀렸다면 첫 좌석 조회에서 드러납니다.
+      </p>
+    </form>
+  );
+}
+
+// 알림 기기 등록 (Phase 3 항목 E, D-9/D-20/D-21).
+//
+// ★ 권한 요청은 **버튼 탭 핸들러 안에서만** 일어난다. 화면이 뜰 때 자동으로 요청하면
+// iOS에서 조용히 실패한다 — 예외도 프롬프트도 없다. 그래서 이 컴포넌트는 마운트 시
+// 목록과 공개키만 읽고, 권한은 사용자가 누를 때까지 건드리지 않는다.
+function PushDevices({ setError }) {
+  const [devices, setDevices] = useState(null);
+  const [vapidKey, setVapidKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const blocked = pushBlockedReason();
+
+  const reload = () => api.pushDevices().then(setDevices).catch((e) => setError(e.message));
+
+  useEffect(() => {
+    api.pushConfig()
+      .then((c) => setVapidKey(c.vapid_public_key))
+      .catch((e) => setError(e.message));
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const enable = async () => {
+    setBusy(true);
+    setError(null);
+    setTestResult(null);
+    try {
+      // 이 await 체인 전체가 탭 핸들러 안이다 (D-21)
+      const subscription = await subscribeThisDevice(vapidKey);
+      await api.registerPushDevice({ ...subscription, label: guessDeviceLabel() });
+      await reload();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (id) => {
+    setBusy(true);
+    try {
+      await api.deletePushDevice(id);
+      // 이 기기를 지웠을 수도 있으니 브라우저 구독도 함께 정리한다 —
+      // 남겨두면 다시 켤 때 옛 endpoint가 그대로 살아 있어 상태가 어긋난다
+      await unsubscribeThisDevice();
+      await reload();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const test = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setTestResult(await api.pushTest());
+      await reload(); // 410으로 정리된 기기가 있으면 목록에서 사라진다
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <label style={st.label}>알림 기기</label>
+
+      {devices === null ? (
+        <p style={st.dim}>불러오는 중…</p>
+      ) : devices.length === 0 ? (
+        <p style={{ ...st.dim, marginTop: 0 }}>등록된 기기가 없습니다. 알림이 오지 않습니다.</p>
+      ) : (
+        devices.map((d) => (
+          <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+            <span style={{ ...st.pill, ...st.pillGps }}>{d.label || "기기"}</span>
+            <span style={{ ...st.dim, flex: 1 }}>
+              {new Date(d.created_at).toLocaleDateString("ko-KR")} 등록
+            </span>
+            <button style={st.ghostBtn} disabled={busy} onClick={() => remove(d.id)}>
+              해제
+            </button>
+          </div>
+        ))
+      )}
+
+      {blocked ? (
+        <p style={{ ...st.dim, marginTop: 8 }}>{blocked}</p>
+      ) : (
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <button style={{ ...st.primaryBtn, flex: 1, marginTop: 0 }} disabled={busy} onClick={enable}>
+            {busy ? "…" : "이 기기에 알림 켜기"}
+          </button>
+          <button style={st.filterBtn} disabled={busy} onClick={test}>
+            테스트 발송
+          </button>
+        </div>
+      )}
+
+      {testResult && (
+        <p style={{ ...st.dim, marginTop: 8 }}>
+          {testResult.sent > 0
+            ? `${testResult.sent}대에 발송했습니다 · 폰에 알림이 떴는지 확인하세요`
+            : "발송되지 않았습니다"}
+          {testResult.errors.length > 0 && ` — ${testResult.errors.join(" · ")}`}
+        </p>
+      )}
+    </>
+  );
+}
+
+// 디스코드 웹훅 (Phase 3 항목 A, D-11).
+// opt-in 2단계: ① 웹훅 연동 + ② 토글 on. 둘 다 켜야 발송된다.
+// iOS 웹푸시가 미덥지 않을 때의 보완 채널이다 (D-9).
+function DiscordLink({ user, onUserChange, setError }) {
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const run = async (fn) => {
+    setBusy(true);
+    setError(null);
+    try {
+      onUserChange(await fn());
+      setUrl("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (user.discord_linked) {
+    return (
+      <>
+        <label style={st.label}>디스코드 알림</label>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            disabled={busy}
+            onClick={() => run(() => api.setDiscordEnabled(!user.discord_enabled))}
+            style={{
+              ...st.filterBtn,
+              background: user.discord_enabled ? "#1a3a6b" : "#fff",
+              color: user.discord_enabled ? "#fff" : "#1a3a6b",
+            }}
+          >
+            {user.discord_enabled ? "켜짐" : "꺼짐"}
+          </button>
+          <span style={{ ...st.dim, flex: 1 }}>
+            켜두면 웹푸시와 <b>함께</b> 발송됩니다.
+          </span>
+          <button style={st.ghostBtn} disabled={busy} onClick={() => run(api.unlinkDiscord)}>
+            해제
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        run(() => api.linkDiscord(url));
+      }}
+    >
+      <label style={st.label} htmlFor="discord_url">
+        디스코드 웹훅 URL (선택)
+      </label>
+      <input
+        id="discord_url"
+        style={st.input}
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        placeholder="https://discord.com/api/webhooks/…"
+        autoComplete="off"
+      />
+      <button style={{ ...st.primaryBtn, marginTop: 12 }} type="submit" disabled={busy || !url}>
+        {busy ? "…" : "디스코드 연동"}
+      </button>
+      <p style={{ ...st.dim, marginTop: 8 }}>
+        서버 채널 설정 → 연동 → 웹훅에서 URL을 만들어 붙여넣으세요. 저장할 때 테스트
+        메시지를 한 건 보내 URL을 검증하며, 실패하면 저장하지 않습니다. URL은 암호화해
+        저장하고 다시 표시되지 않습니다.
       </p>
     </form>
   );

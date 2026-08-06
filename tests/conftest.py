@@ -68,6 +68,13 @@ def _isolated_settings(tmp_path, monkeypatch):
     # 테스트 전용 Fernet 키 (코레일 자격증명 암호화, Phase 2 C).
     # 고정값이라 결정적이다 — 실 키는 .env에만 있고 여기로 새지 않는다.
     monkeypatch.setenv("SECRET_KEY", "hQ2yA1nQ8vJZ0pQ7cX5rT3uW9sB6dF4gH8kL2mN0oP4=")
+    # 스케줄러는 테스트에서 절대 돌지 않는다 (Phase 3). TestClient가 lifespan을 실행하므로
+    # 끄지 않으면 30초 틱이 살아나 실제 시계에 의존하는 테스트가 된다 (CLAUDE.md 테스트 규칙).
+    # 폴링 사이클은 `run_tick(now=...)`을 직접 부르는 방식으로만 검증한다.
+    monkeypatch.setenv("SCHEDULER_ENABLED", "false")
+    # 실 .env의 VAPID 키가 새어들어 테스트가 밖으로 발송하는 일을 막는다
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "")
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

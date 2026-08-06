@@ -163,12 +163,18 @@ def evaluate(
     return AlertDecision(alert=alert, verdict_hash=cur_hash, cells_snapshot=my_seat_cells)
 
 
-def fetch_failed_alert(ctx: AlertContext) -> Alert:
-    """한 조회 시점 내 30초×3 재시도 전부 실패 (D-17). 합성 대상이 아니다."""
+def fetch_failed_alert(ctx: AlertContext, *, reason: str | None = None) -> Alert:
+    """조회 실패 (D-17). 합성 대상이 아니다 — 다른 종류가 애초에 계산 불가다.
+
+    `reason`은 진단 문구다. 5종을 늘리지 않으면서(8절) "왜 실패했는지"를 알려주려면
+    본문에 담는 수밖에 없다 — 자격증명 미연동과 코레일 장애는 사용자가 취할 행동이
+    전혀 다른데 둘 다 "갱신 실패"로만 오면 앱을 열어봐도 알 수 없다 (D-34).
+    """
+    tail = f" ({reason})" if reason else ""
     return Alert(
         kind=AlertKind.FETCH_FAILED,
         title="좌석 정보 갱신 실패",
-        body="화면 데이터가 낡았습니다 · 앱에서 수동 갱신해 주세요",
+        body=f"화면 데이터가 낡았습니다 · 앱에서 수동 갱신해 주세요{tail}",
         subscription_id=ctx.subscription_id,
     )
 
