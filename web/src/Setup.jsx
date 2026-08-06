@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
+import StationPicker from "./StationPicker";
 import { st } from "./styles";
 
 // 탑승 등록 (PLAN 10절 '열차 선택 화면', D-25).
 // 코레일 앱과 같은 순서로 좁혀 들어간다:
-//   출발/도착역 드롭다운 → 운행일 + 검색 기준 시각(하한) → 열차 선택 → 입석/착석 → 등록
-// 역 이름을 타이핑시키지 않는 게 핵심이다 — 오타가 곧 404고, 사용자는 정식 역명을 모른다.
-// Phase 1의 데이터는 Mock이고, Phase 2에서 소스만 실연동으로 바뀐다.
+//   출발/도착역 선택 → 운행일 + 검색 기준 시각(하한) → 열차 선택 → 입석/착석 → 등록
+// 오타가 곧 404고 사용자는 정식 역명을 모르므로, **확정되는 값은 언제나 목록에서 고른 역**이다.
+// 실연동으로 역이 282개가 되면서 통짜 드롭다운은 성립하지 않게 됐다 —
+// StationPicker가 타이핑으로 목록을 좁혀준다 (D-32).
 
 const nowParts = () => {
   const fmt = (opts) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Seoul", ...opts });
@@ -32,17 +34,10 @@ export default function Setup({ onCreated, onOpenSettings }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.stations()
-      .then((list) => {
-        setStations(list);
-        // 첫 진입 편의: 노선 양 끝을 기본값으로. 프리셋이 생기면 여기서 채운다 (Phase 4)
-        setQuery((q) => ({
-          ...q,
-          from: q.from || list[0]?.name || "",
-          to: q.to || list[list.length - 1]?.name || "",
-        }));
-      })
-      .catch((err) => setError(err.message));
+    // 역은 비워 둔 채 시작한다. 목업(6개) 시절엔 노선 양 끝을 기본값으로 넣었지만,
+    // 실테이블 282개에서 가나다순 처음/끝은 아무 의미가 없다 — 어차피 둘 다 바꿔야 한다.
+    // 자주 쓰는 구간을 채우는 것은 프리셋의 일이다 (Phase 4).
+    api.stations().then(setStations).catch((err) => setError(err.message));
   }, []);
 
   const set = (key) => (e) => setQuery({ ...query, [key]: e.target.value });
@@ -97,15 +92,19 @@ export default function Setup({ onCreated, onOpenSettings }) {
           <div style={st.segRow}>
             <div style={st.segCol}>
               <label style={st.label} htmlFor="from">출발역</label>
-              <select id="from" style={st.input} value={query.from} onChange={set("from")} required>
-                {stations.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
-              </select>
+              <StationPicker
+                id="from" stations={stations} value={query.from}
+                onChange={(name) => setQuery((q) => ({ ...q, from: name }))}
+                disabled={!stations.length} required
+              />
             </div>
             <div style={st.segCol}>
               <label style={st.label} htmlFor="to">도착역</label>
-              <select id="to" style={st.input} value={query.to} onChange={set("to")} required>
-                {stations.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
-              </select>
+              <StationPicker
+                id="to" stations={stations} value={query.to}
+                onChange={(name) => setQuery((q) => ({ ...q, to: name }))}
+                disabled={!stations.length} required
+              />
             </div>
           </div>
 
