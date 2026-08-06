@@ -25,10 +25,13 @@ fi
 # (phase0 잔재 — 실 자격증명은 DB 에 Fernet 으로 있다).
 KEYS='SECRET_KEY|VAPID_PUBLIC_KEY|VAPID_PRIVATE_KEY|VAPID_SUBJECT|DATA_GO_KR_SERVICE_KEY'
 
-if command -v shasum >/dev/null 2>&1; then
-  hash_cmd() { shasum -a 256; }
-elif command -v sha256sum >/dev/null 2>&1; then
+# sha256sum(coreutils)을 먼저 찾는다. 리눅스의 `shasum` 은 Perl 스크립트라, ssh 로
+# 맥의 LANG=ko_KR.UTF-8 이 전달되면 키마다 로케일 경고 수십 줄을 토해 출력을 덮어버린다
+# (첫 배포에서 실제로 그랬다). macOS 에는 sha256sum 이 없어 shasum 으로 떨어진다.
+if command -v sha256sum >/dev/null 2>&1; then
   hash_cmd() { sha256sum; }
+elif command -v shasum >/dev/null 2>&1; then
+  hash_cmd() { shasum -a 256; }
 else
   echo "shasum/sha256sum 이 없다" >&2
   exit 1

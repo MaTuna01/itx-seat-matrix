@@ -98,7 +98,11 @@ fi
 # ── 4. Tailscale ─────────────────────────────────────────────────────
 hdr "Tailscale"
 if command -v tailscale >/dev/null 2>&1; then
-  ts_state=$(tailscale status --json 2>/dev/null | grep -o '"BackendState":"[^"]*"' | head -1 | cut -d'"' -f4)
+  # `tailscale status --json` 은 들여쓴 JSON 을 낸다 — `"BackendState": "Running"` 처럼
+  # 콜론 뒤에 공백이 있다. 공백을 허용하지 않으면 매칭이 실패해 "상태를 읽을 수 없다"가 뜬다
+  # (실제로 첫 배포에서 이 오탐이 났다).
+  ts_json=$(tailscale status --json 2>/dev/null || true)
+  ts_state=$(printf '%s' "$ts_json" | grep -o '"BackendState": *"[^"]*"' | head -1 | cut -d'"' -f4)
   [ -n "${ts_state:-}" ] && say "$OK" "BackendState: $ts_state" || say "$WARN" "상태를 읽을 수 없다"
   serve=$(tailscale serve status 2>&1 | head -5)
   if printf '%s' "$serve" | grep -q "127.0.0.1:8000"; then
@@ -107,8 +111,10 @@ if command -v tailscale >/dev/null 2>&1; then
     say "$NG" "serve가 8000을 프록시하지 않는다 — sudo tailscale serve --bg 8000"
     printf '%s\n' "$serve" | sed 's/^/    /'
   fi
-  # key expiry가 켜져 있으면 반년 뒤 조용히 끊긴다 (12절)
-  if tailscale status --json 2>/dev/null | grep -q '"KeyExpiry"'; then
+  # key expiry가 켜져 있으면 반년 뒤 조용히 끊긴다 (12절).
+  # ★ 이 노드(Self)만 본다 — JSON 에는 피어(아이폰·맥)도 들어 있어서 전체를 grep 하면
+  #   남의 expiry 때문에 오탐이 난다. "Peer" 앞까지가 Self 구역이다.
+  if printf '%s' "${ts_json%%\"Peer\":*}" | grep -q '"KeyExpiry"'; then
     say "$WARN" "이 노드에 key expiry가 남아 있다 — admin 콘솔에서 비활성화해라 (안 하면 반년 뒤 조용히 끊긴다)"
   fi
 else

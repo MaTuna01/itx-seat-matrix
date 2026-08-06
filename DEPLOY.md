@@ -32,7 +32,7 @@ clone하고, `.env`는 아이맥에서 긁어오지 않고 **별도 보관본(�
 > 에뮬레이션에서 `npm ci` + vite 빌드가 몇 배로 느려진다. 개발기로는 계속 쓴다.
 
 **M4도 tailnet에 넣어라.** 이미지 전송과 파일 복사를 전부 tailnet 위에서 한다.
-(현재 tailnet: `imac`, `iphone-14-pro`. 배포 후 `itx`가 추가된다.)
+(현재 tailnet: `imac`, `iphone-14-pro`, `macbookair`. 배포 후 `korail-matrix`가 추가된다.)
 
 ---
 
@@ -44,7 +44,7 @@ EC2 → **인스턴스 시작**:
 
 | 항목 | 값 | 주의 |
 |---|---|---|
-| 이름 | `itx` | |
+| 이름 | `korail-matrix` | tailnet 호스트명과 같게 두면 헷갈리지 않는다 |
 | AMI | **Ubuntu Server 24.04 LTS — arm64** (Canonical) | ★ x86_64 AMI를 고르면 t4g에서 시작조차 안 된다. AMI 목록에서 아키텍처를 **arm64로 먼저 전환**하고 골라라. 기본 SSH 사용자는 `ubuntu`다 (`ec2-user`가 아니다) |
 | 인스턴스 유형 | **t4g.nano** | |
 | 키 페어 | 새로 만들어 받아둔다 (`itx.pem`) | Tailscale이 붙기 전 첫 접속용. 붙은 뒤에는 안 쓰지만 **잠겼을 때의 유일한 탈출구**라 만들어 둔다 |
@@ -171,18 +171,19 @@ Tailscale은 **호스트에** 설치한다 (컨테이너 사이드카가 아니�
 curl -fsSL https://tailscale.com/install.sh | sh
 
 # 2) --ssh 를 반드시 붙인다 (22번을 닫기 위한 전제다)
-sudo tailscale up --ssh --hostname=itx
+sudo tailscale up --ssh --hostname=korail-matrix
 
 # 3) 앱을 tailnet에 노출. 443 → 127.0.0.1:8000
 sudo tailscale serve --bg 8000
-tailscale serve status        # https://itx.tail9115e9.ts.net 확인
+tailscale serve status        # https://korail-matrix.tail9115e9.ts.net 확인
 ```
 
 그다음 **admin 콘솔**([login.tailscale.com](https://login.tailscale.com/admin/machines)):
 
 - [ ] **MagicDNS 켜기** + **HTTPS Certificates 켜기** — 둘 다 필요하다. 안 켜면 `*.ts.net`
       신뢰 인증서가 안 나오고, 자체서명으로는 **PWA 홈화면 추가와 웹푸시가 동작하지 않는다** (D-8)
-- [ ] `itx` 노드의 **key expiry 비활성화** (Machines → itx → ⋯ → Disable key expiry).
+- [ ] `korail-matrix` 노드의 **key expiry 비활성화** (Machines → korail-matrix → ⋯ → Disable key expiry).
+      끄고 나면 목록에 `Expiry disabled`로 표시된다 — 그걸 눈으로 확인해라.
       기본값은 180일 후 재인증이다 — **반년 뒤 어느 날 조용히 접근이 끊기고 스케줄러 알림도 함께 멈춘다**
 
 ### 22번을 닫는다 — 확인 뒤에
@@ -190,7 +191,7 @@ tailscale serve status        # https://itx.tail9115e9.ts.net 확인
 **다른 기기(M4)에서 Tailscale SSH가 되는 것을 먼저 확인한다:**
 
 ```bash
-ssh ubuntu@itx     # M4에서. 키 파일 없이 붙어야 한다
+ssh ubuntu@korail-matrix     # M4에서. 키 파일 없이 붙어야 한다
 ```
 
 붙으면 EC2 콘솔 → 보안 그룹 → **인바운드 규칙을 전부 삭제**한다 (22번 포함).
@@ -280,7 +281,7 @@ scripts/env_fingerprint.sh ~/itx-prod.env
 
 ```bash
 # M4 → EC2
-scp ~/itx-prod.env ubuntu@itx:~/itx-seat-matrix/.env
+scp ~/itx-prod.env ubuntu@korail-matrix:~/itx-seat-matrix/.env
 rm -P ~/itx-prod.env     # macOS. Linux면 shred -u
 ```
 
@@ -324,7 +325,7 @@ pgrep -fl 'uvicorn app.main'      # 남아 있으면 kill
 
 거꾸로 하면 문제가 사라진다. **EC2는 리눅스라 Tailscale SSH가 되므로, 아이맥이 클라이언트가
 되어 EC2로 밀어 넣으면 된다** — 중간 경유도, 원격 로그인도 필요 없다. (그래서 이 절만은
-아이맥 앞에서 하고, **3절까지 끝나 `itx` 노드가 살아 있어야 한다.**)
+아이맥 앞에서 하고, **3절까지 끝나 `korail-matrix` 노드가 살아 있어야 한다.**)
 
 ```bash
 # 아이맥에서. sqlite3 는 macOS 기본 탑재다
@@ -342,7 +343,7 @@ sqlite3 /tmp/itx-migrate.db "select 'user',count(*) from user union all
   select 'push_device',count(*) from push_device;"
 
 # EC2로 직접 전송
-scp /tmp/itx-migrate.db ubuntu@itx:~/itx-seat-matrix/data/itx.db
+scp /tmp/itx-migrate.db ubuntu@korail-matrix:~/itx-seat-matrix/data/itx.db
 ```
 
 > `/tmp/itx-migrate.db`는 **7·8절 검증이 끝날 때까지 지우지 마라** — 유일한 롤백이다.
@@ -370,7 +371,7 @@ sqlite3 ~/Downloads/itx-migrate.db "select 'user',count(*) from user union all
   select 'push_device',count(*) from push_device union all
   select 'train_stop',count(*) from train_stop;"
 
-scp ~/Downloads/itx-migrate.db ubuntu@itx:~/itx-seat-matrix/data/itx.db
+scp ~/Downloads/itx-migrate.db ubuntu@korail-matrix:~/itx-seat-matrix/data/itx.db
 ```
 
 끝나면 **아이맥 데스크톱의 사본을 지운다** (`rm -P ~/Desktop/itx-migrate.db`). M4 쪽 사본은
@@ -422,10 +423,10 @@ docker build --platform linux/arm64 --provenance=false -t itx-seat-matrix:local 
 docker image inspect itx-seat-matrix:local --format '{{.Architecture}}'
 
 # 전송 (압축해서 ~70MB 안팎)
-docker save itx-seat-matrix:local | gzip | ssh ubuntu@itx 'gunzip | docker load'
+docker save itx-seat-matrix:local | gzip | ssh ubuntu@korail-matrix 'gunzip | docker load'
 
 # ★ 받은 쪽에서도 확인한다 — load 가 조용히 실패하면 여기서 드러난다
-ssh ubuntu@itx "docker image inspect itx-seat-matrix:local --format '{{.Architecture}}'"
+ssh ubuntu@korail-matrix "docker image inspect itx-seat-matrix:local --format '{{.Architecture}}'"
 ```
 
 > **`--provenance=false`를 왜 붙이나.** 요즘 buildx는 기본으로 provenance(attestation)를
@@ -473,7 +474,7 @@ docker compose ps                   # health: healthy 가 될 때까지 (start-p
 curl -i http://127.0.0.1:8000/healthz
 ```
 
-M4·iMac 브라우저에서 `https://itx.tail9115e9.ts.net` → 로그인 화면이 떠야 한다.
+M4·iMac 브라우저에서 `https://korail-matrix.tail9115e9.ts.net` → 로그인 화면이 떠야 한다.
 
 - [ ] 로그인된다 (기존 계정이 그대로 — DB를 옮겼으므로)
 - [ ] 설정 화면에서 **코레일 "연결됨"**이 켜져 있다 → `SECRET_KEY`가 제대로 옮겨졌다는 증거다.
@@ -515,12 +516,12 @@ plist는 없다 — 수동 실행이라 한 번 내리면 재부팅해도 되살
 ## 8. 폰 재등록 — **오리진이 바뀌었으므로 한 번은 반드시 필요하다**
 
 지금까지 폰은 `https://imac.tail9115e9.ts.net`을 보고 있었다. 새 주소는
-`https://itx.tail9115e9.ts.net`이다. **웹푸시 구독은 오리진 단위**라 기존
+`https://korail-matrix.tail9115e9.ts.net`이다. **웹푸시 구독은 오리진 단위**라 기존
 `push_device` 등록은 새 주소에서 쓸 수 없다 (D-34). VAPID 키를 그대로 옮긴 것과는 별개 문제다.
 
 폰(iOS Safari)에서:
 
-1. `https://itx.tail9115e9.ts.net` 접속 → 로그인
+1. `https://korail-matrix.tail9115e9.ts.net` 접속 → 로그인
 2. **공유 → 홈 화면에 추가** (홈 화면 앱에서만 웹푸시가 동작한다)
 3. 홈 화면 아이콘으로 열고 → 설정 → **"알림 켜기" 버튼을 탭**
    (권한 요청은 사용자 제스처 안에서만 된다 — 자동 요청은 조용히 실패한다, D-21)
@@ -548,7 +549,7 @@ print(c.execute('select id, substr(endpoint,1,45), created_at from push_device')
 # M4: 빌드 + 전송
 cd ~/itx-seat-matrix && git pull
 docker build --platform linux/arm64 --provenance=false -t itx-seat-matrix:local .
-docker save itx-seat-matrix:local | gzip | ssh ubuntu@itx 'gunzip | docker load'
+docker save itx-seat-matrix:local | gzip | ssh ubuntu@korail-matrix 'gunzip | docker load'
 
 # EC2
 cd ~/itx-seat-matrix && git pull        # compose 파일·스크립트 갱신
