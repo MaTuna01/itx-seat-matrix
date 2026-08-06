@@ -22,11 +22,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date as _date
 from datetime import datetime
 
 from app.adapters.korail_client import (
     KorailClient,
+    KorailSoldOut,
     general_cars,
     get_client,
     parse_delay_minutes,
@@ -45,6 +47,8 @@ from app.domain.models import (
 from app.storage import stations as station_repo
 from app.storage import train_stops as stop_repo
 from app.storage.db import get_conn
+
+log = logging.getLogger(__name__)
 
 
 class CredentialsRequired(ValueError):
@@ -204,23 +208,39 @@ class Korail2Adapter:
         """동기 구간. 스레드에서 돈다.
 
         호출 수 = 1(ScheduleView) + 1(TrainResearch) + **잔여석 있는 일반실 호차 수**.
+
+        **빈 리스트는 실패가 아니라 '이 구간 전 좌석 판매됨'이다** (D-36).
+        `merge_seat_maps`가 부재 좌석을 판매로 채우므로(D-18) 그대로 매트릭스가 된다.
         """
         train = client.find_train(d, frm, to, train_no)
-        if train is not None:
-            observations.observe(train, d)  # 열차명·지연을 공짜로 줍는다
         if train is None:
-            # ValueError는 재시도 대상이 아니다 — 다시 불러도 같은 답이다
-            # (seatmap_fetcher._with_retry 참고).
-            raise ValueError(f"{frm}→{to} 구간에 열차 {train_no}가 없다")
+            # 매진 구간은 ScheduleView가 결과를 주지 않는다 — 그걸 "열차가 없다"로 읽으면
+            # **앞 구간에서 이미 받아온 좌석표까지 통째로 버린다.** 중간까지만이라도 앉을 수
+            # 있다는 정보가 가장 쓸모 있는데 그게 사라진다 (D-36).
+            # 없는 열차번호는 여기까지 오지 않는다 — get_stops(정차역 캐시)가 먼저 막는다.
+            log.info("%s→%s 구간에 열차 %s 없음 → 전 좌석 판매로 간주", frm, to, train_no)
+            return []
+        observations.observe(train, d)  # 열차명·지연을 공짜로 줍는다
+
+        try:
+            cars = general_cars(client.car_list(train))
+        except KorailSoldOut:
+            log.info("%s→%s 구간 매진 (호차 조회) → 전 좌석 판매로 간주", frm, to)
+            return []
 
         seats: list[SeatState] = []
-        for car in general_cars(client.car_list(train)):
+        for car in cars:
             if _rest_seats(car) <= 0:
                 continue  # 잔여 0 → 좌석맵을 받아봐야 전부 판매됨이다 (D-27)
             car_no = _car_no(car)
             if car_no is None:
                 continue
-            seats.extend(client.seat_states(train, car_no))
+            try:
+                seats.extend(client.seat_states(train, car_no))
+            except KorailSoldOut:
+                # 호차 목록을 받은 사이에 그 호차가 팔렸다. 그 호차만 판매로 두고 계속한다 —
+                # 여기서 던지면 다른 호차의 빈자리까지 함께 사라진다
+                log.info("%s→%s %s호차 매진 → 건너뜀", frm, to, car_no)
         return seats
 
 
