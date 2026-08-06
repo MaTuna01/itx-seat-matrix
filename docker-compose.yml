@@ -1,0 +1,46 @@
+# ITX 자유석 좌석 매트릭스 — 배포 (PLAN.md 12절)
+#
+# ★ **컨테이너는 1개다. 늘리지 마라.** APScheduler가 인프로세스라 프로세스가 둘이면
+#   같은 구독을 동시에 폴링하고 알림이 중복 발사된다 (→ D-17). `deploy.replicas`,
+#   `--scale`, uvicorn `--workers 2` 전부 같은 사고다.
+#
+# 이미지는 보통 Apple Silicon 맥에서 빌드해 `docker save | ssh | docker load`로
+# 올린다 (arm64 네이티브). 그 경우 EC2에서는 `docker compose up -d --no-build`.
+# 인스턴스에서 직접 빌드하는 폴백 경로를 위해 `build:`도 남겨둔다 → DEPLOY.md
+
+services:
+  app:
+    build: .
+    image: itx-seat-matrix:local
+    container_name: itx
+    # 재부팅·크래시 자동 복구 (12절). 스케줄러가 멈추면 알림이 조용히 끊긴다 —
+    # `next_poll_at` 포인터가 재시작을 흡수하므로(D-19) 재시작 자체는 안전하다.
+    restart: unless-stopped
+
+    # **호스트 루프백에만 퍼블리시한다.** 외부 노출은 호스트의 `tailscale serve`가
+    # 443 → 127.0.0.1:8000으로 프록시하는 방식이고, 보안그룹 인바운드는 22번까지
+    # 전부 닫혀 있다 (12절). `"8000:8000"`으로 바꾸면 그 전제가 무너진다.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # 시크릿은 파일로만 넣는다 (커밋 금지). 서버의 `.env`는 로컬 것을 그대로 복사하지
+    # 않는다 — SECRET_KEY/VAPID는 그대로 옮기고 KORAIL_ID/PW는 옮기지 않는다 (D-35).
+    # 정확한 키 목록은 DEPLOY.md "`.env` 이관".
+    env_file: .env
+
+    # SQLite 파일을 호스트에 남긴다 — 컨테이너를 지워도 계정·구독·푸시 기기가 살아야 한다.
+    # **계정과 코레일 자격증명(Fernet 암호문)이 들어 있다. 백업 파일 취급 주의** (12절).
+    # `DB_PATH=data/itx.db`(상대경로) + WORKDIR `/app` → `/app/data/itx.db`.
+    volumes:
+      - ./data:/app/data
+
+    # 10GB EBS에 30초 틱 + 액세스 로그가 무제한으로 쌓이면 디스크가 찬다.
+    # 찼을 때 먼저 죽는 것은 SQLite 쓰기다 — 알림이 조용히 멈추는 경로다.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 헬스체크는 Dockerfile의 HEALTHCHECK를 쓴다 (`/healthz`).
+    # 상태 확인: docker compose ps  /  scripts/deploy_check.sh
