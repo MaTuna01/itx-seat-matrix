@@ -224,8 +224,16 @@ class Korail2Adapter:
 
         try:
             cars = general_cars(client.car_list(train))
-        except KorailSoldOut:
-            log.info("%s→%s 구간 매진 (호차 조회) → 전 좌석 판매로 간주", frm, to)
+        except KorailSoldOut as exc:
+            # 코드값을 함께 남긴다 — `SOLD_OUT_CODES`가 아직 비어 있어 한국어 문구 매칭에
+            # 기대고 있다(D-36). 실 로그에서 코드를 확보하면 문구 의존을 줄일 수 있다
+            log.info(
+                "%s→%s 구간 매진 (호차 조회) → 전 좌석 판매로 간주 [h_msg_cd=%s] %s",
+                frm,
+                to,
+                exc.msg_cd,
+                exc.msg_txt,
+            )
             return []
 
         seats: list[SeatState] = []
@@ -237,10 +245,17 @@ class Korail2Adapter:
                 continue
             try:
                 seats.extend(client.seat_states(train, car_no))
-            except KorailSoldOut:
+            except KorailSoldOut as exc:
                 # 호차 목록을 받은 사이에 그 호차가 팔렸다. 그 호차만 판매로 두고 계속한다 —
                 # 여기서 던지면 다른 호차의 빈자리까지 함께 사라진다
-                log.info("%s→%s %s호차 매진 → 건너뜀", frm, to, car_no)
+                log.info(
+                    "%s→%s %s호차 매진 → 건너뜀 [h_msg_cd=%s] %s",
+                    frm,
+                    to,
+                    car_no,
+                    exc.msg_cd,
+                    exc.msg_txt,
+                )
         return seats
 
 

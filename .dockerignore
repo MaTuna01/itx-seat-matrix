@@ -1,0 +1,40 @@
+# 빌드 컨텍스트에서 제외 — 이미지에 들어가면 안 되는 것부터.
+#
+# **시크릿과 DB가 이미지 레이어에 박히는 사고를 여기서 막는다.** `.gitignore`는
+# 커밋만 막고 `docker build`는 워킹트리를 그대로 읽는다 — 두 파일이 따로 필요하다.
+# 이미지는 레지스트리·tar로 옮겨 다니므로 한 번 박히면 회수가 안 된다.
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# 프론트 — 소스만 넣고 산출물은 이미지 안에서 빌드한다 (web/dist는 gitignore 대상).
+# 호스트의 node_modules는 플랫폼별 바이너리를 품고 있어 arm64 이미지에서 깨진다.
+web/node_modules/
+web/dist/
+
+# 파이썬 — 로컬 venv는 x86 바이너리다. 컨테이너는 uv로 다시 설치한다
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 빌드에 불필요한 것 (레이어 캐시를 헛되게 무효화하는 것들)
+.git/
+.github/
+.idea/
+.vscode/
+.claude/
+tests/
+docs/
+*.md
+seat-matrix.jsx
+scripts/phase0_results/
+scripts/phase2_results/
+.DS_Store
