@@ -327,14 +327,26 @@ cd ~/itx-seat-matrix
 git switch dev && git pull
 
 # arch를 명시한다 — M4에서는 기본값도 arm64지만, 명시해두면 다른 맥에서 실수하지 않는다
-docker build --platform linux/arm64 -t itx-seat-matrix:local .
+# --provenance=false 는 빼지 마라 (바로 아래 이유)
+docker build --platform linux/arm64 --provenance=false -t itx-seat-matrix:local .
 
 # arm64인지 확인 (여기서 x86_64면 EC2에서 exec format error가 난다)
 docker image inspect itx-seat-matrix:local --format '{{.Architecture}}'
 
-# 전송 (압축해서 ~100MB 안팎)
+# 전송 (압축해서 ~70MB 안팎)
 docker save itx-seat-matrix:local | gzip | ssh ec2-user@itx 'gunzip | docker load'
+
+# ★ 받은 쪽에서도 확인한다 — load 가 조용히 실패하면 여기서 드러난다
+ssh ec2-user@itx "docker image inspect itx-seat-matrix:local --format '{{.Architecture}}'"
 ```
+
+> **`--provenance=false`를 왜 붙이나.** 요즘 buildx는 기본으로 provenance(attestation)를
+> 붙이고, 그러면 `docker save` 산출물이 **index 안에 index가 있는 중첩 구조**가 된다
+> (`application/vnd.oci.image.index.v1+json`이 두 겹). 컨테이너 이미지 스토어가 containerd가
+> 아닌 데몬 — Amazon Linux 2023의 도커 기본값이 그렇다 — 에서는 이 tar를 `docker load`가
+> 제대로 읽지 못할 수 있다. `--provenance=false`면 최상위가 평범한 `manifest.v2+json`을
+> 직접 가리켜서 어느 데몬에서도 로드된다. **이미지 내용은 완전히 같다** (config digest 동일).
+> 하필 100MB를 다 보낸 뒤 실패하는 자리라 처음부터 붙이는 편이 낫다.
 
 <details>
 <summary>폴백: 인스턴스에서 직접 빌드 (M4가 없을 때)</summary>
@@ -346,6 +358,10 @@ docker save itx-seat-matrix:local | gzip | ssh ec2-user@itx 'gunzip | docker loa
 ```bash
 cd ~/itx-seat-matrix && docker compose build && docker compose up -d
 ```
+
+**`.env`가 없으면 `docker compose`는 빌드조차 시작하지 않는다** (`env file ... not found`로
+즉시 종료). 4절을 먼저 끝내라 — 이 순서를 지키면 마주치지 않지만, 폴백으로 이 절만 보고
+따라오면 걸린다.
 </details>
 
 ---
@@ -434,7 +450,7 @@ print(c.execute('select id, substr(endpoint,1,45), created_at from push_device')
 ```bash
 # M4: 빌드 + 전송
 cd ~/itx-seat-matrix && git pull
-docker build --platform linux/arm64 -t itx-seat-matrix:local .
+docker build --platform linux/arm64 --provenance=false -t itx-seat-matrix:local .
 docker save itx-seat-matrix:local | gzip | ssh ec2-user@itx 'gunzip | docker load'
 
 # EC2

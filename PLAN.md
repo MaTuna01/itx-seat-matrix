@@ -2358,6 +2358,15 @@ tailnet 초대가 하나 더 얹힌다. 그래서 Vercel 같은 공개 배포 �
     의존하지 않는다 (이중 방어, D-10)
   - **`tzdata`를 명시적으로 설치한다.** slim 이미지에 들어 있는지에 기대면
     `ZoneInfo("Asia/Seoul")`이 `ZoneInfoNotFoundError`로 죽는다 (절대규칙 1이 전부 이것에 걸려 있다)
+  - **`--provenance=false`로 빌드한다.** 기본값(provenance 부착)이면 `docker save` 산출물이
+    index 안에 index가 있는 중첩 구조가 되고, containerd 이미지 스토어를 쓰지 않는 데몬
+    (Amazon Linux 2023 기본)에서 `docker load`가 이를 못 읽을 수 있다. 이미지 내용은
+    동일하다(config digest 동일). **하필 전송을 다 마친 뒤에 실패하는 자리다**
+
+**검증 상태(v12)**: amd64 네이티브로 시험 빌드해 전 단계(`npm ci`·vite·`uv sync`·`tzdata`·
+`useradd`) 통과와 컨테이너 기동(uid 1000 / `--workers 1` 단일 프로세스 / healthcheck healthy /
+`+09:00` / 마운트한 `data/`에 DB 생성)을 확인했다. **arm64 빌드 자체는 M4의 첫 빌드가 첫 실행이다** —
+베이스 이미지 3개가 linux/arm64를 제공하는 것만 레지스트리 API로 확인해 뒀다.
   - **로그 로테이션** (`max-size: 10m`, `max-file: 3`). 10GB 디스크에 30초 틱 + 액세스 로그가
     무제한으로 쌓이면 디스크가 차고, **그때 먼저 죽는 것은 SQLite 쓰기다** — 알림이 조용히 멈춘다
 
