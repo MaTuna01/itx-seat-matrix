@@ -31,7 +31,7 @@ health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{
 restarts=$(docker inspect --format '{{.RestartCount}}' "$C_NAME" 2>/dev/null || echo "?")
 
 if [ "$state" = "running" ]; then
-  say "$OK" "상태: running (health=$health, 재시작 $restarts회)"
+  say "$OK" "상태: running (health=$health, 재시작 ${restarts}회)"
 else
   say "$NG" "상태: $state — 컨테이너가 돌지 않는다. docker compose logs app 을 봐라"
 fi
@@ -39,7 +39,7 @@ fi
 # 재시작이 잦으면 OOM이다. nano는 0.5GB — 스왑 없이는 새벽에 잡아먹힌다 (12절)
 if [ "$restarts" != "?" ] && [ "$restarts" -gt 3 ] 2>/dev/null; then
   # 우분투는 dmesg_restrict가 기본이라 일반 사용자로는 dmesg가 비어 보인다 — sudo 로 봐야 한다
-  say "$WARN" "재시작 $restarts회 — OOM 의심. 아래 스왑 항목과 'sudo dmesg | grep -i oom'을 확인해라"
+  say "$WARN" "재시작 ${restarts}회 — OOM 의심. 아래 스왑 항목과 'sudo dmesg | grep -i oom'을 확인해라"
 fi
 
 oom=$(docker inspect --format '{{.State.OOMKilled}}' "$C_NAME" 2>/dev/null || echo "?")
@@ -128,11 +128,39 @@ if [ -z "$logs" ]; then
   say "$WARN" "최근 10분 로그가 비어 있다"
 else
   ticks=$(printf '%s' "$logs" | grep -c "폴링 틱" || true)
-  starts=$(printf '%s' "$logs" | grep -c "폴링 스케줄러 시작" || true)
   fails=$(printf '%s' "$logs" | grep -c "폴링 틱 실패" || true)
-  say "·" "폴링 틱 로그 ${ticks}건 / 스케줄러 시작 ${starts}건 / 틱 실패 ${fails}건"
-  if [ "$ticks" = "0" ] && [ "$starts" = "0" ]; then
-    say "$WARN" "둘 다 0이다. 구독이 없거나(정상) LOG_LEVEL이 INFO가 아니거나 SCHEDULER_ENABLED=false다"
+
+  # 기동 로그는 **전체 로그**에서 본다. 10분 창으로만 보면 컨테이너가 오래 떠 있는 정상
+  # 상태에서 0건이 되고, 그때마다 경고가 떠서 진짜 신호를 무시하게 된다 (실제로 그랬다).
+  # `grep -m1 -q`라 첫 줄에서 끝난다 — 로그가 커도 비용이 없다.
+  if docker logs "$C_NAME" 2>&1 | grep -m1 -q "폴링 스케줄러 시작"; then
+    started_at=$(docker inspect --format '{{.State.StartedAt}}' "$C_NAME" 2>/dev/null | cut -c1-19)
+    say "$OK" "스케줄러 기동 확인 (컨테이너 시작 ${started_at:-?} UTC)"
+  else
+    say "$NG" "기동 로그가 없다 — SCHEDULER_ENABLED / LOG_LEVEL 을 확인해라 (D-39)"
+  fi
+
+  say "·" "최근 10분: 폴링 틱 ${ticks}건 / 틱 실패 ${fails}건"
+
+  # 틱 0건은 대개 정상이다 — `TickReport.__bool__`이 polled/expired/skipped 가 전부 비면
+  # False라서, **조회할 구독이 도래하지 않은 틱은 로그를 남기지 않는다**
+  # (app/scheduler/poller.py). 그래서 0건일 때는 설정을 대신 확인한다.
+  if [ "$ticks" = "0" ]; then
+    env_line=$(docker exec "$C_NAME" sh -c 'echo "$SCHEDULER_ENABLED|$LOG_LEVEL|$ADAPTER"' 2>/dev/null || echo "?|?|?")
+    sched=${env_line%%|*}
+    rest=${env_line#*|}
+    level=${rest%%|*}
+    adapter=${rest#*|}
+    case "$sched" in
+      true|True|1) : ;;
+      *) say "$NG" "SCHEDULER_ENABLED=$sched — 알림이 아예 오지 않는다" ;;
+    esac
+    case "$level" in
+      INFO|DEBUG|info|debug) : ;;
+      *) say "$WARN" "LOG_LEVEL=$level — 폴링 틱 로그가 안 남아 검증이 불가능하다 (D-39)" ;;
+    esac
+    [ "$adapter" = "korail2" ] || say "$WARN" "ADAPTER=$adapter — mock이면 가짜 좌석으로 알림이 온다"
+    say "·" "틱 로그 0건은 조회할 구독이 도래하지 않았다는 뜻이다 (설정은 위에서 확인했다)"
   fi
   [ "$fails" != "0" ] && say "$NG" "틱 실패가 있다 — docker compose logs app | grep -A20 '폴링 틱 실패'"
   printf '%s' "$logs" | grep -E "폴링 틱|매진|FETCH_FAILED|SECRET_KEY|MACRO ERROR" | tail -8 | sed 's/^/    /'
@@ -148,7 +176,7 @@ if [ -f "$db" ]; then
   if [ "$owner" = "1000:1000" ]; then
     say "$OK" "$db ($size, uid $owner)"
   else
-    say "$WARN" "$db 소유자가 $owner다 — 컨테이너는 uid 1000으로 돈다. sudo chown -R 1000:1000 data"
+    say "$WARN" "$db 소유자가 ${owner}다 — 컨테이너는 uid 1000으로 돈다. sudo chown -R 1000:1000 data"
   fi
 else
   say "$NG" "$db 가 없다 — 개발 DB를 옮겼는지 확인해라 (DEPLOY.md '데이터 이관')"
