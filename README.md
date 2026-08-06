@@ -159,10 +159,24 @@ docker compose up -d --no-build     # 이미지는 Apple Silicon 맥에서 빌�
 git config core.hooksPath scripts/hooks
 ```
 
+## CI
+
+`dev`·`main` 푸시와 PR에서 GitHub Actions가 돈다 (`.github/workflows/ci.yml`, → D-44).
+**배포는 하지 않는다.**
+
+| 잡 | 내용 |
+|---|---|
+| `test` | `uv sync --locked` + `pytest` |
+| `build` | `ubuntu-24.04-arm`에서 **네이티브 arm64** 이미지 빌드 + 스모크 (arm64 / KST / uid 1000 / `/healthz` / 스케줄러 기동 로그). 프론트 `vite build`도 이 안에서 검증된다 |
+| `secrets` | pre-commit 훅과 **같은 규칙**을 추적 파일 전체에 적용 (`scripts/secret_scan.py`) |
+
+`secrets` 잡은 훅을 대체하지 못한다 — `.env`의 실제 값 대조는 러너에 `.env`가 없어
+불가능하다. 훅을 켜는 일은 여전히 필요하다.
+
 ## 주의
 
 - 코레일 **비공식 API**(korail2 역공학 결과물)를 사용한다. 언제든 깨질 수 있고, 자동화 조회는 약관 회색지대이므로 **정차역당 1~2회로 조회를 최소화**하도록 설계돼 있다. 공격적 폴링 금지.
 - 코레일이 도입한 안티봇(`x-dynapath-m-token`)을 우회하는 코드에 의존한다. 앱 업데이트로 토큰 스킴이 바뀌면 깨진다 — 개인용·저빈도·조회 전용이라는 전제 위에서만 성립하는 선택이며, 그 판단 근거는 PLAN.md D-22에 남겨두었다.
 - 개인용 도구다. 회원가입은 부트스트랩 1회 후 잠그며, 서버는 Tailscale 내부망에서만 접근 가능하다. **코레일 계정은 사용자마다 각자 필요하다** — 한 계정을 나눠 쓰는 것은 권하지 않는다(동시 세션은 안티봇 관점에서 위험하다).
 - 조회 전용이다. 예매/발권 기능은 없고 만들지 않는다.
-- 시크릿은 `.env`에만 둔다. `scripts/hooks/pre-commit`이 추적되는 파일로 새어 나가는 것을 기계적으로 막는다.
+- 시크릿은 `.env`에만 둔다. `scripts/hooks/pre-commit`이 추적되는 파일로 새어 나가는 것을 기계적으로 막고, CI가 같은 규칙을 다시 돈다 (규칙 본체는 `scripts/secret_scan.py`).
