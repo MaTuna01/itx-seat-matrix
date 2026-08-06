@@ -100,11 +100,19 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   }
 
   const { stops, seats, verdict, position_source, delay_minutes } = data;
+  const boardIdx = stops.indexOf(data.board_at);
   const alightIdx = stops.indexOf(data.alight_at);
   // 실효 시작 = max(current_seg_idx, board_idx) — 서버가 이미 적용해 verdict에 담아준다 (D-18)
   const startIdx = verdict.current_seg_idx;
   const myKey = data.my_seat_no ? `${data.my_car}-${data.my_seat_no}` : null;
-  const segments = stops.slice(0, -1).map((s, i) => ({ from: s, to: stops[i + 1], idx: i }));
+  // 표시 범위는 **내 구간(탑승~하차)뿐이다.** `stops`는 전체 노선이지만(D-18 인덱스 규칙)
+  // 내 구간 밖은 애초에 조회하지 않으므로 셀이 UNQUERIED_CELL(=판매됨)로 채워져 있다.
+  // 그대로 그리면 관측하지 않은 값이 관측값처럼 보인다 — 특히 하차역 이후는 흐림 처리도
+  // 걸리지 않아(startIdx는 항상 하차역 앞) 실조회한 "전부 매진"처럼 읽힌다.
+  // 인덱스는 전체 노선 기준을 그대로 쓴다 — 슬라이스해서 재번호를 매기면 D-18과 어긋난다.
+  const segments = stops
+    .slice(boardIdx, alightIdx)
+    .map((s, i) => ({ from: s, to: stops[boardIdx + i + 1], idx: boardIdx + i }));
   const seated = data.sub_status === "SEATED";
 
   const rows = (() => {
@@ -154,12 +162,16 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           </span>
         </div>
 
-        {/* ── 노선 진행바 ── */}
+        {/* ── 노선 진행바 (매트릭스와 같은 범위 = 내 구간) ──
+            전체 노선을 그리면 28정차 열차에서 역 이름이 뭉개진다. 인덱스는
+            전체 노선 기준을 유지해 startIdx 비교가 그대로 맞아떨어진다. */}
         <div style={st.routeBar}>
-          {stops.map((name, i) => (
+          {stops.slice(boardIdx, alightIdx + 1).map((name, offset) => {
+            const i = boardIdx + offset;
+            return (
             <div key={name} style={st.routeStop}>
               <div style={st.routeLineWrap}>
-                {i > 0 && (
+                {i > boardIdx && (
                   <div style={{ ...st.routeLine, background: i <= startIdx ? "#1a3a6b" : "#d8dee9" }} />
                 )}
                 <div
@@ -181,7 +193,8 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                 {name}
               </span>
             </div>
-          ))}
+            );
+          })}
         </div>
       </header>
 
