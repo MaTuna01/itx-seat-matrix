@@ -35,6 +35,11 @@ PUBLIC_KEYS = {
     "SESSION_DAYS",
     "SESSION_TRANSIENT_HOURS",
     "ADAPTER",
+    # Phase 3. VAPID_SUBJECT는 연락처 URI(mailto:)일 뿐이고, 발송 권한은
+    # VAPID_PRIVATE_KEY가 쥔다 — 그쪽은 여기 없으므로 값이 채워지면 차단된다 (D-34)
+    "VAPID_SUBJECT",
+    "SCHEDULER_ENABLED",
+    "SCHEDULER_INTERVAL_SECONDS",
 }
 
 # 커밋되면 안 되는 경로 (.gitignore가 이미 막지만 `git add -f`를 뚫고 들어올 수 있다)

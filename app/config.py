@@ -27,6 +27,22 @@ class Settings(BaseSettings):
     # Fernet 대칭키 — 코레일 비밀번호/디스코드 웹훅 암호화용 (Phase 2·3에서 사용)
     secret_key: str = ""
 
+    # ── 웹푸시 VAPID (PLAN 8절, D-34) ────────────────────────────────
+    # 공개키만 프론트로 나간다 (`GET /api/push/config`). 비밀키는 DB에도 넣지 않는다.
+    # 생성: uv run python scripts/gen_vapid.py  (vapid_subject는 mailto: 연락처 URI)
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_subject: str = "mailto:itx@localhost"
+
+    # ── 스케줄러 (PLAN 9절) ──────────────────────────────────────────
+    # 30초 틱. 틱 자체는 "시계 확인"일 뿐이고 코레일 조회는 next_poll_at 도래 시에만 발생한다.
+    scheduler_enabled: bool = True
+    scheduler_interval_seconds: int = 30
+
+    @property
+    def webpush_configured(self) -> bool:
+        return bool(self.vapid_public_key and self.vapid_private_key)
+
 
 @lru_cache
 def get_settings() -> Settings:
