@@ -38,7 +38,8 @@ fi
 
 # 재시작이 잦으면 OOM이다. nano는 0.5GB — 스왑 없이는 새벽에 잡아먹힌다 (12절)
 if [ "$restarts" != "?" ] && [ "$restarts" -gt 3 ] 2>/dev/null; then
-  say "$WARN" "재시작 $restarts회 — OOM 의심. 아래 스왑 항목과 dmesg를 확인해라"
+  # 우분투는 dmesg_restrict가 기본이라 일반 사용자로는 dmesg가 비어 보인다 — sudo 로 봐야 한다
+  say "$WARN" "재시작 $restarts회 — OOM 의심. 아래 스왑 항목과 'sudo dmesg | grep -i oom'을 확인해라"
 fi
 
 oom=$(docker inspect --format '{{.State.OOMKilled}}' "$C_NAME" 2>/dev/null || echo "?")
@@ -91,7 +92,7 @@ if command -v curl >/dev/null 2>&1; then
     say "$NG" "GET /healthz → $code"
   fi
 else
-  say "$WARN" "curl이 없어 건너뜀 (sudo dnf install -y curl)"
+  say "$WARN" "curl이 없어 건너뜀 (sudo apt-get install -y curl)"
 fi
 
 # ── 4. Tailscale ─────────────────────────────────────────────────────

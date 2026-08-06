@@ -16,7 +16,7 @@
 |---|---|---|
 | **M4 MacBook Air** (arm64) | **작업 거점 — 빌드와 나머지 전부** | t4g는 Graviton(arm64). Apple Silicon에서 빌드하면 네이티브 arm64가 나온다 |
 | **Intel iMac** (x86_64) | **`data/itx.db` 원본 제공 — 이것만** | 실 코레일 자격증명과 푸시 기기 등록이 이 DB에만 있다 |
-| **EC2 t4g.nano** | 실행 | 24시간 깨어 있어야 30초 틱이 멈추지 않는다 (Phase 3이 열린 채로 남은 이유) |
+| **EC2 t4g.nano** (Ubuntu 24.04 LTS, arm64) | 실행 | 24시간 깨어 있어야 30초 틱이 멈추지 않는다 (Phase 3이 열린 채로 남은 이유). SSH 사용자는 `ubuntu` (D-42) |
 
 **아이맥에서 사람이 해야 하는 일은 "서버를 내리는 것" 하나뿐이다.** DB는 M4에서 ssh 한 줄로
 뽑아온다(5절). `.env`는 아이맥에서 긁어오지 않고 **별도 보관본(노션 등)에서 손으로 만든다**(4절) —
@@ -40,7 +40,7 @@ EC2 → **인스턴스 시작**:
 | 항목 | 값 | 주의 |
 |---|---|---|
 | 이름 | `itx` | |
-| AMI | **Amazon Linux 2023 — arm64** | ★ x86_64 AMI를 고르면 t4g에서 시작조차 안 된다. AMI 목록에서 아키텍처를 **arm64로 먼저 전환**하고 골라라 |
+| AMI | **Ubuntu Server 24.04 LTS — arm64** (Canonical) | ★ x86_64 AMI를 고르면 t4g에서 시작조차 안 된다. AMI 목록에서 아키텍처를 **arm64로 먼저 전환**하고 골라라. 기본 SSH 사용자는 `ubuntu`다 (`ec2-user`가 아니다) |
 | 인스턴스 유형 | **t4g.nano** | |
 | 키 페어 | 새로 만들어 받아둔다 (`itx.pem`) | Tailscale이 붙기 전 첫 접속용. 붙은 뒤에는 안 쓰지만 **잠겼을 때의 유일한 탈출구**라 만들어 둔다 |
 | 네트워크 | 기본 VPC / 퍼블릭 IP 자동 할당 **켜기** | 아웃바운드로 Tailscale·코레일에 나가야 한다. 탄력적 IP는 **붙이지 않는다** (12절) |
@@ -57,7 +57,7 @@ EC2 → **인스턴스 시작**:
 
 ```bash
 chmod 400 ~/Downloads/itx.pem
-ssh -i ~/Downloads/itx.pem ec2-user@<퍼블릭IP>
+ssh -i ~/Downloads/itx.pem ubuntu@<퍼블릭IP>
 ```
 
 ---
@@ -81,24 +81,59 @@ free -h                                                      # Swap 2.0Gi 확인
 `fallocate`가 아니라 `dd`를 쓴다 — 파일시스템에 따라 `fallocate`로 만든 파일은
 `swapon`이 거부한다.
 
-### Docker + compose 플러그인
+### Docker + compose 플러그인 (도커 공식 apt 저장소)
+
+우분투 자체 패키지(`docker.io`)에는 compose 플러그인이 따라오지 않는다. 공식 저장소를 쓰면
+`docker-compose-plugin`이 함께 오므로 **바이너리를 손으로 내려받는 단계가 없다.**
 
 ```bash
-sudo dnf install -y docker git
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl git
+
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# arch 는 dpkg 가 알려준다 — arm64 를 손으로 적지 않는다 (오타 여지를 없앤다)
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
-sudo usermod -aG docker ec2-user
+sudo usermod -aG docker ubuntu
 exit          # 그룹 반영을 위해 재로그인 (안 하면 계속 sudo가 필요하다)
 ```
 
-**AL2023 저장소에는 compose 플러그인이 없다.** 따로 넣는다 (aarch64 바이너리):
+재로그인 후 확인:
 
 ```bash
-sudo mkdir -p /usr/libexec/docker/cli-plugins
-sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-aarch64 \
-  -o /usr/libexec/docker/cli-plugins/docker-compose
-sudo chmod +x /usr/libexec/docker/cli-plugins/docker-compose
-docker compose version
+docker compose version     # v2.x
+docker run --rm hello-world
 ```
+
+### snapd를 지운다 — 0.5GB에서는 아깝다
+
+우분투 서버 이미지에는 snapd가 들어 있고 상주하면서 100MB 안팎을 먹는다. 이 서버가 쓰는
+것은 도커뿐이라 지워도 잃는 게 없다:
+
+```bash
+sudo systemctl disable --now snapd.socket snapd.service snapd.seeded.service 2>/dev/null
+sudo apt-get purge -y snapd
+free -h        # 여유 메모리가 늘어난 것을 확인
+```
+
+> 캐노니컬 AWS 이미지는 **SSM 에이전트를 snap으로** 넣는다. 즉 snapd를 지우면 Session
+> Manager 경로도 사라진다. 다만 이 인스턴스에는 **IAM 인스턴스 프로파일을 붙이지 않았으므로
+> SSM은 애초에 쓸 수 없다** — 잠겼을 때의 탈출구는 1절의 키 페어다. 그건 지우지 마라.
+
+### 자동 업데이트는 그대로 둔다
+
+우분투는 `unattended-upgrades`가 기본으로 켜져 있다. 자동 **재부팅**은 기본값이 꺼짐이라
+아침에 인스턴스가 사라질 일은 없다. 도커가 갱신되면 컨테이너가 한 번 재시작되면서
+**폴링이 한 틱 빠질 수 있지만**, `next_poll_at` 포인터는 DB에 있어 재시작에 강하고
+compose가 `restart: unless-stopped`라 알아서 돌아온다 (D-17 상단 주석).
 
 ### 저장소 클론
 
@@ -108,6 +143,10 @@ docker compose version
 ```bash
 git clone https://github.com/MaTuna01/itx-seat-matrix.git ~/itx-seat-matrix
 cd ~/itx-seat-matrix
+
+# ★ 먼저 확인한다 — 우분투의 기본 사용자 ubuntu 는 uid 1000 이고, 컨테이너도 uid 1000 으로
+#   돈다. 이 두 값이 같아야 바인드 마운트한 data/ 를 컨테이너가 쓸 수 있다
+id -u        # 1000 이어야 한다
 
 # data/ 는 gitignore라 클론에 없다. **컨테이너가 uid 1000으로 도므로 소유자를 맞춰둔다.**
 # 먼저 만들지 않으면 docker가 root 소유로 만들고 SQLite가 "readonly database"로 죽는다
@@ -146,7 +185,7 @@ tailscale serve status        # https://itx.tail9115e9.ts.net 확인
 **다른 기기(M4)에서 Tailscale SSH가 되는 것을 먼저 확인한다:**
 
 ```bash
-ssh ec2-user@itx     # M4에서. 키 파일 없이 붙어야 한다
+ssh ubuntu@itx     # M4에서. 키 파일 없이 붙어야 한다
 ```
 
 붙으면 EC2 콘솔 → 보안 그룹 → **인바운드 규칙을 전부 삭제**한다 (22번 포함).
@@ -232,7 +271,7 @@ scripts/env_fingerprint.sh ~/itx-prod.env
 
 ```bash
 # M4 → EC2
-scp ~/itx-prod.env ec2-user@itx:~/itx-seat-matrix/.env
+scp ~/itx-prod.env ubuntu@itx:~/itx-seat-matrix/.env
 rm -P ~/itx-prod.env     # macOS. Linux면 shred -u
 ```
 
@@ -293,7 +332,7 @@ sqlite3 ~/itx-migrate.db "select 'user',count(*) from user union all
   select 'train_stop',count(*) from train_stop union all
   select 'push_device',count(*) from push_device;"
 
-scp ~/itx-migrate.db ec2-user@itx:~/itx-seat-matrix/data/itx.db
+scp ~/itx-migrate.db ubuntu@itx:~/itx-seat-matrix/data/itx.db
 ```
 
 > `~/itx-migrate.db`는 **7·8절 검증이 끝날 때까지 지우지 마라** — 유일한 롤백이다.
@@ -334,16 +373,16 @@ docker build --platform linux/arm64 --provenance=false -t itx-seat-matrix:local 
 docker image inspect itx-seat-matrix:local --format '{{.Architecture}}'
 
 # 전송 (압축해서 ~70MB 안팎)
-docker save itx-seat-matrix:local | gzip | ssh ec2-user@itx 'gunzip | docker load'
+docker save itx-seat-matrix:local | gzip | ssh ubuntu@itx 'gunzip | docker load'
 
 # ★ 받은 쪽에서도 확인한다 — load 가 조용히 실패하면 여기서 드러난다
-ssh ec2-user@itx "docker image inspect itx-seat-matrix:local --format '{{.Architecture}}'"
+ssh ubuntu@itx "docker image inspect itx-seat-matrix:local --format '{{.Architecture}}'"
 ```
 
 > **`--provenance=false`를 왜 붙이나.** 요즘 buildx는 기본으로 provenance(attestation)를
 > 붙이고, 그러면 `docker save` 산출물이 **index 안에 index가 있는 중첩 구조**가 된다
 > (`application/vnd.oci.image.index.v1+json`이 두 겹). 컨테이너 이미지 스토어가 containerd가
-> 아닌 데몬 — Amazon Linux 2023의 도커 기본값이 그렇다 — 에서는 이 tar를 `docker load`가
+> 아닌 데몬 — 도커 CE의 기본값이 그렇고, 우분투에 apt로 넣는 `docker-ce`도 여기 해당한다 — 에서는 이 tar를 `docker load`가
 > 제대로 읽지 못할 수 있다. `--provenance=false`면 최상위가 평범한 `manifest.v2+json`을
 > 직접 가리켜서 어느 데몬에서도 로드된다. **이미지 내용은 완전히 같다** (config digest 동일).
 > 하필 100MB를 다 보낸 뒤 실패하는 자리라 처음부터 붙이는 편이 낫다.
@@ -451,7 +490,7 @@ print(c.execute('select id, substr(endpoint,1,45), created_at from push_device')
 # M4: 빌드 + 전송
 cd ~/itx-seat-matrix && git pull
 docker build --platform linux/arm64 --provenance=false -t itx-seat-matrix:local .
-docker save itx-seat-matrix:local | gzip | ssh ec2-user@itx 'gunzip | docker load'
+docker save itx-seat-matrix:local | gzip | ssh ubuntu@itx 'gunzip | docker load'
 
 # EC2
 cd ~/itx-seat-matrix && git pull        # compose 파일·스크립트 갱신

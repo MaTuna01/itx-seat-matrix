@@ -143,9 +143,10 @@ uv run python scripts/load_train_stops.py
 
 ### 배포
 
-컨테이너 1개(`Dockerfile` + `docker-compose.yml`)를 EC2에서 돌리고 Tailscale로 접근한다.
-**절차는 [DEPLOY.md](./DEPLOY.md)를 따른다** — 조용히 틀리는 지점(arm64 / 스왑 / `--workers 1` /
-`SECRET_KEY`·VAPID 이관 / WAL DB 이관)이 거기 정리돼 있다.
+컨테이너 1개(`Dockerfile` + `docker-compose.yml`)를 EC2 t4g.nano(**Ubuntu 24.04 LTS arm64**,
+D-42)에서 돌리고 Tailscale로 접근한다. **절차는 [DEPLOY.md](./DEPLOY.md)를 따른다** —
+조용히 틀리는 지점(arm64 / 스왑 / `--workers 1` / `SECRET_KEY`·VAPID 이관 / WAL DB 이관 /
+`docker save`의 중첩 index)이 거기 정리돼 있다.
 
 ```bash
 docker compose up -d --no-build     # 이미지는 Apple Silicon 맥에서 빌드해 올린다 (D-40)

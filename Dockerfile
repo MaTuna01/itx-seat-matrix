@@ -70,8 +70,8 @@ COPY app/ ./app/
 COPY scripts/ ./scripts/
 COPY --from=web /web/dist ./web/dist
 
-# 비루트 실행. **uid를 1000으로 고정한다** — 호스트의 ec2-user가 uid 1000이라
-# 바인드 마운트한 `data/`의 소유자와 맞아떨어진다. 어긋나면 SQLite가
+# 비루트 실행. **uid를 1000으로 고정한다** — 호스트의 기본 사용자(우분투 `ubuntu`)가
+# uid 1000이라 바인드 마운트한 `data/`의 소유자와 맞아떨어진다. 어긋나면 SQLite가
 # "attempt to write a readonly database"로 죽는다 (조용히 틀리진 않고 500으로 드러난다).
 RUN groupadd -g 1000 app \
  && useradd -u 1000 -g 1000 -M -s /usr/sbin/nologin app \
