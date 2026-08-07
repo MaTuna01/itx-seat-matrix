@@ -65,6 +65,13 @@ export const api = {
   setSignupEnabled: (signup_enabled) =>
     request("/api/admin/settings", { method: "PATCH", body: { signup_enabled } }),
 
+  // 사용자 관리 (D-53). 목록에는 자격증명이 없다 — 연동 여부만 온다
+  adminUsers: () => request("/api/admin/users"),
+  // 비밀번호는 **지우는 관리자 본인의 것**이다. 화면이 버튼을 감추더라도
+  // 자기 자신·관리자 삭제는 서버가 400으로 거절한다 (그쪽이 진짜 방어선이다)
+  deleteUser: (id, password) =>
+    request(`/api/admin/users/${id}`, { method: "DELETE", body: { password } }),
+
   // 역 드롭다운 소스 (D-25). Phase 2에서 station 테이블로 소스만 바뀐다
   stations: () => request("/api/stations"),
   // time은 "이 시각 이후 출발" 하한 (HH:MM)

@@ -10,6 +10,15 @@ import web from "./skins/web";
 // API를 흉내 낸다. 화면이 로딩/에러 상태로만 보이면 레이아웃을 볼 수 없다.
 const CANNED = {
   "/api/admin/settings": { signup_enabled: false },
+  // D-53. 자기 자신(id 1)과 관리자에는 삭제 버튼이 안 그려지는지 눈으로 본다
+  "/api/admin/users": [
+    { id: 1, email: "me@example.com", display_name: "나", is_admin: true,
+      created_at: "2026-07-20T09:00:00+09:00", korail_linked: true, discord_linked: true,
+      subscription_count: 12 },
+    { id: 2, email: "friend@example.com", display_name: "지인", is_admin: false,
+      created_at: "2026-08-07T09:00:00+09:00", korail_linked: false, discord_linked: false,
+      subscription_count: 0 },
+  ],
   "/api/push/config": { vapid_public_key: "preview" },
   "/api/push/devices": [
     { id: 1, label: "iPhone · Safari", created_at: "2026-07-28T09:00:00+09:00" },
@@ -109,6 +118,7 @@ window.fetch = async (url) => {
 };
 
 const USER = {
+  id: 1, // D-53. "나" 표시와 자기 삭제 금지가 이 값으로 갈린다
   display_name: "마찬영",
   email: "ma775100@gmail.com",
   is_admin: true,
