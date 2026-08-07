@@ -223,7 +223,10 @@ def test_입석_첫_조회는_착석_가능_다이제스트다():
     )
     assert decision.alert is not None
     assert decision.alert.kind is AlertKind.SEATS_AVAILABLE
-    assert decision.alert.title == "수원부터 착석 가능"
+    # 구간 1은 평택→수원이다. "구간 1이 비었다" = **평택부터** 앉을 수 있다 (→ D-47).
+    # 한 역 뒤(수원)를 안내하면 평택에서 앉을 기회를 그대로 놓친다.
+    # D-46의 지연 착석 문구가 이미 이 규칙을 쓰고 있었다 (아래 지연 착석 테스트와 비교)
+    assert decision.alert.title == "평택부터 착석 가능"
     assert "4-1B(서울까지)" in decision.alert.body
 
 

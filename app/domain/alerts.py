@@ -232,8 +232,18 @@ def _compose(
     )
 
 
-def _next_station(verdict: Verdict, ctx: AlertContext) -> str:
-    return ctx.station(verdict.start_seg_idx + 1)
+def _start_station(verdict: Verdict, ctx: AlertContext) -> str:
+    """판정이 시작되는 역 = `stops[start_seg_idx]` (→ D-47).
+
+    **`+ 1`이 아니다.** 구간 `i`는 `stops[i] → stops[i+1]`이므로 "구간 i가 비었다"는
+    곧 "`stops[i]`부터 앉을 수 있다"이다. D-46의 지연 착석 문구가 이미 이 규칙을 쓰고
+    있었는데(`station(clear_from_idx)`) 여기만 한 역 뒤를 가리켰다 — 같은 상황에
+    두 가지 답이 나오던 자리다.
+
+    한 역 늦게 안내하면 **그 역에서 앉을 기회를 그대로 놓친다.** 07:14 알림이
+    "수원부터 착석 가능"이라고 하는데 실제로는 평택부터 빈 자리인 식이다.
+    """
+    return ctx.station(verdict.start_seg_idx)
 
 
 def _seat_phrase(r: SeatRecommendation, verdict: Verdict, ctx: AlertContext) -> str:
@@ -271,7 +281,7 @@ def _title(kind: AlertKind, *, verdict: Verdict, ctx: AlertContext) -> str:
             if not verdict.move_to and verdict.move_to_later:
                 first = min(r.clear_from_idx for r in verdict.move_to_later)
                 return f"{ctx.station(first)}부터 착석 가능"
-            return f"{_next_station(verdict, ctx)}부터 착석 가능"
+            return f"{_start_station(verdict, ctx)}부터 착석 가능"
         case AlertKind.SEAT_EXTENDED:
             return f"내 자리 {ctx.my_label} 이용 구간 연장"
         case _:  # pragma: no cover - FETCH_FAILED는 합성 대상이 아니다
@@ -281,9 +291,9 @@ def _title(kind: AlertKind, *, verdict: Verdict, ctx: AlertContext) -> str:
 def _body(kind: AlertKind, *, verdict: Verdict, ctx: AlertContext, config: AlertConfig) -> str:
     match kind:
         case AlertKind.ALL_SOLD:
-            return f"{_next_station(verdict, ctx)} 이후 잔여 없음 → 지하철 환승 고려"
+            return f"{_start_station(verdict, ctx)} 이후 잔여 없음 → 지하철 환승 고려"
         case AlertKind.MY_SEAT_SOLD:
-            sold_from = verdict.my_seat_sold_from or _next_station(verdict, ctx)
+            sold_from = verdict.my_seat_sold_from or _start_station(verdict, ctx)
             top = verdict.move_to[0] if verdict.move_to else None
             if top is None:
                 return f"{ctx.my_label} {sold_from}부터 판매됨 · 옮길 좌석 없음"
@@ -307,7 +317,7 @@ def _short(kind: AlertKind, *, verdict: Verdict, ctx: AlertContext) -> str:
         case AlertKind.ALL_SOLD:
             return "잔여 없음"
         case AlertKind.MY_SEAT_SOLD:
-            sold_from = verdict.my_seat_sold_from or _next_station(verdict, ctx)
+            sold_from = verdict.my_seat_sold_from or _start_station(verdict, ctx)
             return f"{ctx.my_label} {sold_from}부터 판매됨"
         case AlertKind.SEATS_AVAILABLE:
             if verdict.move_to:

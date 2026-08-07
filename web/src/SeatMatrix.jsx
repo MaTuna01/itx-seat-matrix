@@ -105,6 +105,9 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   // 실효 시작 = max(팔 수 있는 첫 구간, board_idx) — 서버가 이미 적용해 verdict에 담아준다 (D-18/D-47).
   // 열차 위치(data.current_seg_idx)와 다르다 — 주행 중이면 이 값이 한 구간 앞선다
   const startIdx = verdict.start_seg_idx;
+  // 진행바는 **열차 위치**를 그린다 — 판정 시작(startIdx)이 아니다 (→ D-47).
+  // 주행 중에는 startIdx가 한 구간 앞서므로 그대로 쓰면 열차가 한 역 앞에 있는 것처럼 보인다.
+  const posIdx = data.current_seg_idx ?? startIdx;
   const myKey = data.my_seat_no ? `${data.my_car}-${data.my_seat_no}` : null;
   // 표시 범위는 **내 구간(탑승~하차)뿐이다.** `stops`는 전체 노선이지만(D-18 인덱스 규칙)
   // 내 구간 밖은 애초에 조회하지 않으므로 셀이 UNQUERIED_CELL(=판매됨)로 채워져 있다.
@@ -184,22 +187,22 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             <div key={name} style={st.routeStop}>
               <div style={st.routeLineWrap}>
                 {i > boardIdx && (
-                  <div style={{ ...st.routeLine, background: i <= startIdx ? "#1a3a6b" : "#d8dee9" }} />
+                  <div style={{ ...st.routeLine, background: i <= posIdx ? "#1a3a6b" : "#d8dee9" }} />
                 )}
                 <div
                   style={{
                     ...st.routeDot,
-                    background: i <= startIdx ? "#1a3a6b" : "#fff",
-                    borderColor: i <= startIdx ? "#1a3a6b" : "#b7c1d1",
+                    background: i <= posIdx ? "#1a3a6b" : "#fff",
+                    borderColor: i <= posIdx ? "#1a3a6b" : "#b7c1d1",
                   }}
                 />
-                {i === startIdx + 1 && <div className="trainPulse" />}
+                {i === posIdx + 1 && <div className="trainPulse" />}
               </div>
               <span
                 style={{
                   ...st.routeName,
-                  fontWeight: i === startIdx + 1 ? 700 : 400,
-                  color: i === startIdx + 1 ? "#1a3a6b" : "#6b7686",
+                  fontWeight: i === posIdx + 1 ? 700 : 400,
+                  color: i === posIdx + 1 ? "#1a3a6b" : "#6b7686",
                 }}
               >
                 {name}
@@ -247,7 +250,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                 <>이동 불필요 · 자리가 팔리면 알림으로 알려드립니다</>
               ) : bestMove ? (
                 <>
-                  {stops[startIdx + 1]} 도착 전 이동 권장 → <b>{bestMove.car}호차 {bestMove.seat_no}</b>
+                  {stops[startIdx]} 도착 전 이동 권장 → <b>{bestMove.car}호차 {bestMove.seat_no}</b>
                   {clearAllCount > 1 && ` 외 ${clearAllCount - 1}석이 ${data.alight_at}까지 빈 좌석`}
                 </>
               ) : laterOnly ? (
@@ -268,7 +271,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                 <span style={{ color: "#c0392b", fontWeight: 700 }}>앉을 좌석 없음</span>
               ) : bestMove ? (
                 <span style={{ color: "#0e7a4a", fontWeight: 700 }}>
-                  {stops[startIdx + 1]}부터 착석 가능
+                  {stops[startIdx]}부터 착석 가능
                 </span>
               ) : laterOnly ? (
                 // 지금은 못 앉는다 — "일부 구간만 착석 가능"보다 **어느 역부터인지**가 정보다
