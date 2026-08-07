@@ -9,7 +9,7 @@
 
 // v2: 판정 요약에 지연 착석 그룹이 추가됐다 (D-46). 올리지 않으면 홈화면 PWA가
 // 앱을 완전히 종료할 때까지 옛 화면을 계속 보여준다.
-const CACHE = "itx-shell-v4";
+const CACHE = "itx-shell-v5";
 const SHELL = "/";
 
 self.addEventListener("install", (event) => {
