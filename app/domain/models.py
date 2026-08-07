@@ -155,8 +155,11 @@ class SeatMatrix(BaseModel):
 class SeatRecommendation(BaseModel):
     car: int
     seat_no: str
+    # 언제부터 앉을 수 있는가 (→ D-46). 실효 시작과 같으면 "지금", 크면 "그 역부터"다.
+    # **이 값 없이 추천만 내보내면 사용자가 지금 앉을 수 있다고 오해한다** — 그게 더 위험하다
+    clear_from_idx: int
     clear_until_idx: int
-    clear_all: bool
+    clear_all: bool  # clear_from_idx부터 하차역까지 계속 빈다
 
     @property
     def key(self) -> str:
@@ -170,7 +173,13 @@ class Verdict(BaseModel):
     my_seat_sold_from: str | None = None
     my_seat_clear_until_idx: int | None = None
     # ── 공통 ──
+    # 지금 당장 앉을 수 있는 좌석
     move_to: list[SeatRecommendation] = Field(default_factory=list)
+    # 지금은 못 앉지만 **몇 정거장 뒤부터** 앉을 수 있는 좌석 (→ D-46).
+    # 두 목록을 합치지 않는 이유: 합치면 1순위가 "지금 못 앉는 자리"가 될 수 있고,
+    # 그러면 화면에서 그 구분을 다시 만들어내야 한다. 퇴근길처럼 탑승 구간만 매진일 때
+    # move_to는 비고 이쪽만 찬다.
+    move_to_later: list[SeatRecommendation] = Field(default_factory=list)
     all_sold_after_current: bool = False
     current_seg_idx: int
 

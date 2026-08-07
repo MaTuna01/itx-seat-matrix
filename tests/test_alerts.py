@@ -274,3 +274,91 @@ def test_조회_실패_알림은_합성_대상이_아니다():
     alert = fetch_failed_alert(ctx())
     assert alert.kind is AlertKind.FETCH_FAILED
     assert alert.subscription_id == 1
+
+
+# ── 지연 착석 (→ D-46) ───────────────────────────────────────────────
+# 목업 노선: 천안(0) 평택(1) 수원(2) 안양(3) 영등포(4) 서울(5)
+
+
+def test_지연_착석만_있어도_알림이_나간다():
+    """퇴근길 모양 — 탑승 구간만 매진이고 그 뒤는 비어 있다.
+
+    이걸 침묵시키면 **퇴근길에는 알림이 영원히 안 온다.** 폴링은 정차역 도착 10분/4분
+    전이라 "평택부터 4호차"를 미리 알면 그 호차로 걸어가 대기할 수 있다.
+    """
+    seats = {"4-1B": [T, F, F, F, F], "3-9A": [T, T, T, T, T]}
+    v = verdict_of(seats, status=STANDING, current_seg_idx=0)
+    assert v.move_to == []  # 지금 앉을 좌석은 없다
+    assert v.all_sold_after_current is False
+
+    decision = evaluate(
+        verdict=v, ctx=ctx(seated=False), my_seat_cells=None,
+        prev_cells=None, prev_hash="something-else",
+    )
+    assert decision.alert is not None
+    assert decision.alert.kind is AlertKind.SEATS_AVAILABLE
+
+
+def test_지연_착석_문구는_언제부터인지를_반드시_말한다():
+    """이게 빠지면 **지금 앉을 수 있다고 오해한다** — 추천을 안 하느니만 못하다."""
+    seats = {"4-1B": [T, F, F, F, F]}
+    v = verdict_of(seats, status=STANDING, current_seg_idx=0)
+    decision = evaluate(
+        verdict=v, ctx=ctx(seated=False), my_seat_cells=None,
+        prev_cells=None, prev_hash="something-else",
+    )
+    alert = decision.alert
+    assert alert is not None
+    # 제목은 "다음 역"이 아니라 실제로 앉을 수 있는 역이다
+    assert alert.title == "평택부터 착석 가능"
+    assert "4-1B(평택부터 서울까지)" in alert.body
+
+
+def test_다이제스트는_지금_앉을_좌석을_먼저_넣는다():
+    seats = {"4-1B": [F, T, T, T, T], "4-2B": [T, F, F, F, F]}
+    v = verdict_of(seats, status=STANDING, current_seg_idx=0)
+    assert [r.seat_no for r in v.move_to] == ["1B"]
+    assert [r.seat_no for r in v.move_to_later] == ["2B"]
+
+    decision = evaluate(
+        verdict=v, ctx=ctx(seated=False), my_seat_cells=None,
+        prev_cells=None, prev_hash="something-else",
+    )
+    body = decision.alert.body
+    assert body.index("4-1B") < body.index("4-2B")
+    assert "4-1B(평택까지)" in body  # 지금 앉을 수 있는 좌석에는 "부터"가 없다
+    assert "4-2B(평택부터 서울까지)" in body
+
+
+def test_지금_앉을_자리가_있으면_지연_목록_변동은_침묵한다():
+    """지연 착석은 **지금 앉을 자리가 없을 때만** 의사결정에 관여한다.
+
+    무조건 해시에 넣으면 앉을 수 있는데도 하위 변동으로 알림이 나간다 (D-16).
+    """
+    keep = {"4-1B": [F, F, F, F, F]}  # 하차역까지 빈 좌석 — 1순위는 고정
+    before = verdict_of({**keep, "4-2B": [T, F, F, F, F]}, status=STANDING, current_seg_idx=0)
+    after = verdict_of({**keep, "4-2B": [T, T, F, F, F]}, status=STANDING, current_seg_idx=0)
+
+    # 지연 착석 1순위의 "언제부터"가 평택 → 수원으로 밀렸다
+    assert before.move_to_later[0].clear_from_idx == 1
+    assert after.move_to_later[0].clear_from_idx == 2
+    assert verdict_hash(before) == verdict_hash(after), "지연 목록 변동으로 해시가 바뀌었다"
+
+
+def test_지연_착석_1순위가_바뀌면_알림이_나간다():
+    """반대로, 지금 앉을 자리가 없을 때는 이 변화가 유일하게 쓸모 있는 정보다."""
+    before = verdict_of({"4-2B": [T, T, F, F, F]}, status=STANDING, current_seg_idx=0)
+    after = verdict_of({"4-2B": [T, F, F, F, F]}, status=STANDING, current_seg_idx=0)
+    assert before.move_to == [] and after.move_to == []
+    assert verdict_hash(before) != verdict_hash(after)
+
+
+def test_전량_매진이면_여전히_ALL_SOLD다():
+    seats = {"4-1B": [T, T, T, T, T], "3-9A": [T, T, T, T, T]}
+    v = verdict_of(seats, status=STANDING, current_seg_idx=0)
+    assert v.move_to_later == []
+    decision = evaluate(
+        verdict=v, ctx=ctx(seated=False), my_seat_cells=None,
+        prev_cells=None, prev_hash="something-else",
+    )
+    assert decision.alert.kind is AlertKind.ALL_SOLD

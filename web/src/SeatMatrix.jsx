@@ -133,6 +133,17 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   const clearAllCount = verdict.move_to.filter((m) => m.clear_all).length;
   const selectedSeat = rows.find((s) => s.key === selected);
 
+  // 지금은 못 앉지만 몇 정거장 뒤부터 앉을 수 있는 좌석 (D-46).
+  // 두 목록을 합치지 않는다 — 합치면 1순위가 "지금 못 앉는 자리"가 될 수 있다.
+  // 퇴근길처럼 탑승 구간만 매진일 때 move_to는 비고 이쪽만 찬다.
+  const laterList = verdict.move_to_later || [];
+  const laterBest = laterList[0];
+  // 지금 앉을 수 있는 좌석이 하나도 없을 때만 요약 문구를 지연 착석으로 대체한다.
+  // 앉을 수 있으면 그냥 앉으면 되므로 그쪽이 항상 우선이다.
+  const laterOnly = verdict.move_to.length === 0 && !!laterBest;
+  const seatRange = (r) =>
+    `${stops[r.clear_from_idx]}부터 ${r.clear_all ? data.alight_at : stops[r.clear_until_idx]}까지`;
+
   return (
     <div style={st.page}>
       {/* ── 헤더: 열차 + 상태 배지 ── */}
@@ -229,6 +240,11 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                   {stops[startIdx + 1]} 도착 전 이동 권장 → <b>{bestMove.car}호차 {bestMove.seat_no}</b>
                   {clearAllCount > 1 && ` 외 ${clearAllCount - 1}석이 ${data.alight_at}까지 빈 좌석`}
                 </>
+              ) : laterOnly ? (
+                <>
+                  지금 옮길 자리는 없음 · <b>{stops[laterBest.clear_from_idx]}</b>부터{" "}
+                  <b>{laterBest.car}호차 {laterBest.seat_no}</b> ({seatRange(laterBest)})
+                </>
               ) : (
                 <>끝까지 비는 좌석 없음 · 아래에서 최장 구간 좌석 확인</>
               )}
@@ -244,6 +260,11 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                 <span style={{ color: "#0e7a4a", fontWeight: 700 }}>
                   {stops[startIdx + 1]}부터 착석 가능
                 </span>
+              ) : laterOnly ? (
+                // 지금은 못 앉는다 — "일부 구간만 착석 가능"보다 **어느 역부터인지**가 정보다
+                <span style={{ color: "#a05a00", fontWeight: 700 }}>
+                  {stops[laterBest.clear_from_idx]}부터 착석 가능
+                </span>
               ) : (
                 <span style={{ color: "#a05a00", fontWeight: 700 }}>일부 구간만 착석 가능</span>
               )}
@@ -257,11 +278,25 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                   {clearAllCount > 1 && ` 외 ${clearAllCount - 1}석`} ·
                   좌석을 선택해 "이 자리에 앉음"을 누르면 이후 알림이 그 자리 기준으로 옵니다
                 </>
+              ) : laterOnly ? (
+                <>
+                  추천 <b>{laterBest.car}호차 {laterBest.seat_no}</b> ({seatRange(laterBest)}) ·
+                  미리 그 호차로 이동해 대기하세요
+                </>
               ) : (
                 <>끝까지 비는 좌석은 없음 · 아래에서 최장 구간 좌석을 골라 앉으세요</>
               )}
             </p>
           </>
+        )}
+
+        {/* 지연 착석 목록 — 지금 앉을 수 있는 좌석과 **분리해서** 보여준다 (D-46).
+            섞으면 "지금 앉을 수 있는 자리"인지 구분이 사라진다. */}
+        {laterList.length > 0 && !verdict.all_sold_after_current && (
+          <p style={st.verdictSub}>
+            {verdict.move_to.length > 0 ? "지금은 아니지만 뒤 구간에 빈 자리" : "빈 자리"}:{" "}
+            {laterList.map((r) => `${r.car}-${r.seat_no}(${seatRange(r)})`).join(", ")}
+          </p>
         )}
         {data.next_poll && (
           <p style={st.nextPoll}>
