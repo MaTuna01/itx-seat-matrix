@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -21,7 +21,12 @@ from tests.conftest import enable_signup, stop_infos
 
 # 목업 열차는 운행일 08:00~08:56에 달린다. 내일 날짜를 쓰면 "운행 전"이 확정돼
 # 현재 구간이 시계와 무관하게 0이 된다 (테스트 결정성)
-RIDE_DATE = (date.today() + timedelta(days=1)).isoformat()
+#
+# ★ **반드시 KST 기준 "내일"이어야 한다** (절대규칙 1). `date.today()`는 naive·로컬 TZ라
+# UTC 러너에서 KST보다 하루 뒤처지고, 그러면 "내일"이 **이미 출발한 오늘**이 된다 —
+# `current_seg_idx`가 0이 아니게 되고 첫 폴 포인트도 지나 있어 세 테스트가 깨졌다.
+# KST 00:00~09:00(= UTC 15:00~24:00)에만 나타나서 로컬에서는 거의 안 보인다 (→ D-44 CI가 잡았다).
+RIDE_DATE = (datetime.now(KST).date() + timedelta(days=1)).isoformat()
 
 
 def make_subscription(client, **overrides) -> dict:
@@ -295,11 +300,46 @@ class TestMatrix:
         assert verdict["my_seat_sold_from"] == "천안"
         # SEATED는 동률이면 내 호차(3호차) 근접순 → 4-1B보다 3-8B가 먼저다
         assert verdict["move_to"][0] == {
-            "car": 3, "seat_no": "8B", "clear_until_idx": 5, "clear_all": True,
+            # clear_from_idx: 지금(실효 시작 0)부터 앉을 수 있다는 뜻 (→ D-46)
+            "car": 3, "seat_no": "8B", "clear_from_idx": 0, "clear_until_idx": 5,
+            "clear_all": True,
         }
         # 하차역까지 비는 좌석은 이 둘뿐이다 (clear_all 좌석이 있으면 그것만 추천)
         assert [f"{r['car']}-{r['seat_no']}" for r in verdict["move_to"]] == ["3-8B", "4-1B"]
+        # 지금 앉을 수 있는 좌석이 있으므로 지연 착석 목록은 별도로 유지된다 (합치지 않는다)
+        assert "move_to_later" in verdict
+        assert body["failed_seg_idxs"] == []  # 정상 조회 (→ D-48)
         assert body["next_poll"] == {"station": "천안", "offset_min": 10}
+
+    def test_한_구간이_실패해도_200과_부분_매트릭스를_준다(self, client, monkeypatch):
+        """★ 회귀 방어 (이슈 #40). 예전에는 한 구간의 실패가 **매트릭스 전체를 500**으로
+        만들었다 — 이미 받아온 다른 구간의 좌석표까지 함께 버려진다.
+
+        실측: 출발 직후 `ERR911081 좌석선택 예약불가`로 화면이 4번 500이 났다.
+        `failed_seg_idxs`가 없으면 화면은 실패를 **매진**으로 그린다 — 전혀 다른 정보다.
+        """
+        from app.adapters.korail_client import KorailApiError
+        from app.adapters.korail_mock import MockKorailAdapter
+
+        real = MockKorailAdapter.get_seat_map
+
+        async def flaky(self, cred, train_no, d, frm, to):  # noqa: ANN001, ANN202
+            if frm == "수원":
+                raise KorailApiError("ERR911081", "좌석선택 예약불가")
+            return await real(self, cred, train_no, d, frm, to)
+
+        monkeypatch.setattr(MockKorailAdapter, "get_seat_map", flaky)
+
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["failed_seg_idxs"] == [2]  # 수원→안양
+        assert body["seats"], "성공한 구간의 좌석표까지 함께 버려졌다"
+        # 실패를 매진으로 읽으면 여기서 환승을 권한다
+        assert body["verdict"]["all_sold_after_current"] is False
 
     def test_좌석_미지정이면_입석_관점_판정(self, client):
         res = client.get(

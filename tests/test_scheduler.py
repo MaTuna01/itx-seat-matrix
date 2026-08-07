@@ -34,7 +34,7 @@ from app.adapters.seatmap_fetcher import RetryPolicy
 from app.domain.models import KST, SeatMap, SeatState, StopInfo
 from app.scheduler.poller import PollerDeps, run_tick
 from app.storage.db import connect, init_db, to_db
-from tests.conftest import ARRIVAL_OFFSETS, RIDE_DATE, STOPS, at
+from tests.conftest import ARRIVAL_OFFSETS, DEPARTURE_OFFSETS, RIDE_DATE, STOPS, at
 
 TRAIN_NO = "1004"
 MY_KEY = (3, "7A")
@@ -55,14 +55,23 @@ class FakePort:
         self.seat_map_calls: list[tuple[str, str]] = []
         self.stops_error: Exception | None = None
         self.seat_map_error: Exception | None = None
+        # 코레일이 **빈 응답**을 주는 구간. 이미 출발한 구간이 여기 들어간다 (→ D-47).
+        # 어댑터는 이것을 '전 좌석 판매됨'으로 흡수한다 (D-36).
+        self.empty_segments: set[int] = set()
+        # 조회가 **실패**하는 구간 (→ D-48). 빈 응답(= 매진)과 전혀 다른 상태다
+        self.failing_segments: set[int] = set()
 
     async def get_stops(self, cred, train_no: str, d: _date) -> list[StopInfo]:
         if self.stops_error is not None:
             raise self.stops_error
         base = datetime(d.year, d.month, d.day, 8, 0, tzinfo=KST)
         return [
-            StopInfo(name=name, arrival=base + timedelta(minutes=offset))
-            for name, offset in zip(STOPS, ARRIVAL_OFFSETS)
+            StopInfo(
+                name=name,
+                arrival=base + timedelta(minutes=arr),
+                departure=None if dep is None else base + timedelta(minutes=dep),
+            )
+            for name, arr, dep in zip(STOPS, ARRIVAL_OFFSETS, DEPARTURE_OFFSETS)
         ]
 
     async def get_seat_map(self, cred, train_no: str, d: _date, frm: str, to: str) -> SeatMap:
@@ -70,12 +79,16 @@ class FakePort:
         if self.seat_map_error is not None:
             raise self.seat_map_error
         seg_idx = STOPS.index(frm)
+        if seg_idx in self.failing_segments:
+            raise ConnectionError(f"구간 {seg_idx} 조회 실패")
         return SeatMap(
             train_no=train_no,
             date=d,
             frm=frm,
             to=to,
-            seats=[
+            seats=[]
+            if seg_idx in self.empty_segments
+            else [
                 SeatState(car=car, seat_no=seat_no, sold=cells[seg_idx])
                 for (car, seat_no), cells in self.cells.items()
             ],
@@ -391,10 +404,59 @@ async def test_조회_범위는_실효_시작부터_하차역까지다(db):
     deps = deps_for(db, port, spy)
     make_sub(db, status="STANDING", board_at="평택", alight_at="영등포")
 
-    # 08:16 = 평택(08:12) 통과 후 → 실효 시작은 구간 1(평택→수원)
+    # 08:16 = 평택 **출발**(08:15) 후. 열차는 평택-수원을 달리는 중이고 그 구간은
+    # 이미 팔 수 없다 → 실효 시작은 구간 2(수원→안양)다 (→ D-47)
     await run_tick(deps, now=SUWON_POINT_10)
-    assert sorted(port.seat_map_calls) == sorted(
-        [("평택", "수원"), ("수원", "안양"), ("안양", "영등포")]
+    assert sorted(port.seat_map_calls) == sorted([("수원", "안양"), ("안양", "영등포")])
+
+
+# ── ★ 이미 출발한 구간은 조회하지 않는다 (이슈 #35 → D-47) ────────────
+async def test_출발한_구간은_조회하지_않는다(db):
+    """★ 회귀 방어. **출발한 구간은 코레일이 팔 수 없다** — 조회하면 빈 응답이 온다.
+
+    2026-08-07 출근길 실측(EC2 로그). 천안 07:12 출발 직후부터 매 폴링마다:
+
+        천안→평택 구간에 열차 4202 없음 → 전 좌석 판매로 간주
+
+    빈 응답은 D-18의 부재 추론으로 '그 구간 전 좌석 판매됨'이 되고, 그 열이 실효 시작
+    구간이라 **판정이 통째로 뒤집힌다** — 하차역까지 안전한 내 자리가 "천안부터 판매됨"이
+    되어 MY_SEAT_SOLD가 나간다. 좌석이 팔린 게 아니라 열차가 출발했을 뿐인데도.
+
+    폴 포인트는 항상 *다음 역 도착 10·4분 전* = **주행 중**이므로 출발 이후 모든 폴링이
+    이 조건에 걸린다. 한 번의 사고가 아니라 구조적이다.
+    """
+    port, spy = FakePort(cells()), SpyNotifier()
+    deps = deps_for(db, port, spy)
+    sub_id = make_sub(
+        db,
+        status="SEATED",
+        my_car=3,
+        my_seat_no="7A",
+        board_at="천안",
+        alight_at="영등포",
+        next_poll_at=at(8, 2),
+    )
+
+    # ① 08:02 — 천안 정차 중(도착 08:00 / 출발 08:03). 이 구간은 아직 팔 수 있다
+    await run_tick(deps, now=at(8, 2))
+    assert ("천안", "평택") in port.seat_map_calls
+    assert len(spy.notes) == 1  # 베이스라인 (D-20)
+    hash_before = row_of(db, sub_id)["last_verdict_hash"]
+
+    # ② 08:03 출발. 코레일은 이 시점부터 천안→평택에 열차를 주지 않는다
+    port.empty_segments = {0}
+    port.seat_map_calls.clear()
+    spy.notes.clear()
+
+    # ③ 08:08 — 평택 도착 4분 전 폴링. 열차는 천안-평택을 달리는 중이다
+    await run_tick(deps, now=at(8, 8))
+
+    assert ("천안", "평택") not in port.seat_map_calls, (
+        "이미 출발한 구간을 조회했다 — 코레일은 이 구간을 팔 수 없으므로 빈 응답이 온다"
+    )
+    assert spy.kinds == [], f"출발했다는 이유만으로 알림이 나갔다: {spy.kinds}"
+    assert row_of(db, sub_id)["last_verdict_hash"] == hash_before, (
+        "구간을 지나쳤을 뿐인데 판정 상태가 바뀌었다"
     )
 
 
@@ -521,17 +583,18 @@ async def test_내_좌석_스냅샷이_기록되고_전이가_감지된다(db):
 
     await run_tick(deps, now=SUWON_POINT_10)
     snapshot = json.loads(row_of(db, sub_id)["last_cells_snapshot"])
-    # 지나온 구간(0)은 조회하지 않아 UNQUERIED_CELL(True)로 채워져 있다 (D-18/D-31).
+    # 조회하지 않은 구간은 UNQUERIED_CELL(True)로 채워져 있다 (D-18/D-31) — 지나온 구간(0)
+    # 뿐 아니라 **지금 달리는 중이라 팔 수 없는 구간(1)** 도 여기 들어간다 (→ D-47).
     # 전이 판정 범위가 [실효 시작, 하차역)이라 이 채움값은 비교에 들어오지 않는다 —
     # 실효 시작은 시간이 갈수록 커지므로 두 스냅샷 모두 그 구간에선 실관측값이다
-    assert snapshot[1:] == [False, True, True, True]
+    assert snapshot[2:] == [True, True, True]
     spy.notes.clear()
 
     # 누가 취소해 잔여 구간의 판매가 풀렸다 → true→false 전이
     port.cells = cells(**{"3_7A": [F, F, F, F, F]})
     await run_tick(deps, now=SUWON_POINT_4)
     assert spy.kinds == ["SEAT_EXTENDED"], f"셀 전이를 놓쳤다: {spy.kinds}"
-    assert json.loads(row_of(db, sub_id)["last_cells_snapshot"])[1:] == [F, F, F, F]
+    assert json.loads(row_of(db, sub_id)["last_cells_snapshot"])[2:] == [F, F, F]
 
 
 async def test_열차_진행만으로는_연장_알림이_나가지_않는다(db):
@@ -643,3 +706,48 @@ async def test_자격증명_복호화_실패는_조용히_끊기지_않는다(db
     assert len(port.seat_map_calls) == 1
     # 포인터는 전진한다 (그 시점 포기, D-17)
     assert row_of(db, sub_id)["next_poll_at"] == to_db(at(8, 44))
+
+
+# ── 구간 단위 부분 실패 (이슈 #40 → D-48) ────────────────────────────
+async def test_일부_구간_실패는_알림을_보류하고_해시를_지킨다(db):
+    """★ 회귀 방어. **불완전한 관측으로는 알리지 않는다.**
+
+    실패한 관측으로 해시를 덮으면 실패 → 복구가 그 자체로 "상태 변화"가 되어,
+    좌석이 하나도 안 팔렸는데 알림이 두 번 나간다. 해시를 그대로 두면 다음 완전한
+    조회가 **마지막 완전한 관측**과 비교되므로 그 요동이 애초에 생기지 않는다.
+    """
+    port, spy = FakePort(cells()), SpyNotifier()
+    deps = deps_for(db, port, spy)
+    sub_id = make_sub(db, status="SEATED", my_car=3, my_seat_no="7A")
+
+    await run_tick(deps, now=SUWON_POINT_10)  # 완전한 조회 — 베이스라인 1건
+    assert len(spy.notes) == 1
+    hash_before = row_of(db, sub_id)["last_verdict_hash"]
+    snapshot_before = row_of(db, sub_id)["last_cells_snapshot"]
+    spy.notes.clear()
+
+    # 한 구간만 실패한다 (매진이 아니라 조회 실패다)
+    port.failing_segments = {2}
+    report = await run_tick(deps, now=SUWON_POINT_4)
+
+    assert spy.kinds == [], f"불완전한 관측으로 알림이 나갔다: {spy.kinds}"
+    assert sub_id in report.polled
+    row = row_of(db, sub_id)
+    assert row["last_verdict_hash"] == hash_before, "실패한 관측이 해시를 덮었다"
+    assert row["last_cells_snapshot"] == snapshot_before
+    # FETCH_FAILED는 전 구간 실패의 신호다 — 부분 실패로 fail_count를 올리지 않는다
+    assert row["fail_count"] == 0
+    # 그 시점은 포기하고 포인터는 전진한다 (D-17)
+    assert row["next_poll_at"] == to_db(at(8, 28))
+
+
+async def test_전_구간_실패는_기존대로_FETCH_FAILED다(db):
+    """부분 실패와 전 구간 실패는 다르다 — 보여줄 것이 없으면 실패가 맞다 (D-34)."""
+    port, spy = FakePort(cells()), SpyNotifier()
+    deps = deps_for(db, port, spy)
+    sub_id = make_sub(db, status="STANDING", board_at="영등포", alight_at="서울")
+    port.failing_segments = {4}  # 구간 1개짜리 이용구간 → 전 구간 실패
+
+    await run_tick(deps, now=at(8, 38))
+    assert spy.kinds == ["FETCH_FAILED"]
+    assert row_of(db, sub_id)["fail_count"] == 1

@@ -25,23 +25,31 @@ def build_segments(stops: list[str]) -> list[Segment]:
     ]
 
 
-def effective_start_idx(current_seg_idx: int, board_idx: int) -> int:
-    """실효 시작 = max(현재 구간, 탑승역) (D-18 인덱스 규칙).
+def effective_start_idx(sellable_seg_idx: int, board_idx: int) -> int:
+    """실효 시작 = max(팔 수 있는 첫 구간, 탑승역) (D-18 인덱스 규칙, D-47).
 
     모든 인덱스는 **전체 노선 `stops` 기준**이다. 탑승역 이전 구간은
     열차가 어디를 달리든 관심 밖.
+
+    첫 인자는 **열차의 현재 위치가 아니다.** 위치를 넣으면 이미 출발해 팔 수 없는 구간이
+    실효 시작이 되어 그 열 전체가 '판매됨'으로 채워진다 (이슈 #35 → D-47).
     """
-    return max(current_seg_idx, board_idx)
+    return max(sellable_seg_idx, board_idx)
 
 
-def query_range(current_seg_idx: int, board_idx: int, alight_idx: int) -> tuple[int, int]:
+def query_range(sellable_seg_idx: int, board_idx: int, alight_idx: int) -> tuple[int, int]:
     """실제로 조회할 구간 인덱스 범위 `[start, end)` (PLAN 5절 2, D-17).
 
     지나온 구간·탑승 전 구간은 판정·표시 모두에 불필요하므로 호출하지 않는다.
+
+    **`start == end`(빈 범위)도 정상 결과다** (→ D-47). 이용 구간의 마지막 구간을 달리는
+    중이면 팔 수 있는 구간이 하나도 남지 않는다. 예전처럼 `alight_idx - 1`로 되돌리면
+    바로 그 '팔 수 없는 구간'을 조회하게 되어 매진 오판이 되살아난다. 호출은 0회가 되고,
+    `build_verdict`가 이 상태를 `decision_needed=False`로 답한다.
     """
     if not (0 <= board_idx < alight_idx):
         raise ValueError(f"구간 인덱스가 올바르지 않다: board={board_idx}, alight={alight_idx}")
-    start = min(effective_start_idx(current_seg_idx, board_idx), alight_idx - 1)
+    start = min(effective_start_idx(sellable_seg_idx, board_idx), alight_idx)
     return start, alight_idx
 
 
@@ -54,6 +62,7 @@ def merge_seat_maps(
     start_idx: int,
     end_idx: int,
     fetched_at: datetime,
+    failed_seg_idxs: list[int] | None = None,
 ) -> SeatMatrix:
     """구간별 좌석맵을 좌석 키로 조인해 매트릭스를 만든다 (PLAN 5절 4).
 
@@ -64,10 +73,15 @@ def merge_seat_maps(
     Phase 0 항목 6 실측 결과 코레일 응답은 '전체 좌석+상태'라 실제로는 전 구간
     좌석 집합이 동일하다 → 이 규칙은 그 경우 단순 조인과 동일하게 동작한다.
     응답이 부분집합으로 바뀌어도 조용히 틀리지 않도록 규칙 자체는 유지한다.
+
+    `failed_seg_idxs`는 **조회에 실패한 구간**이다 (→ D-48). 셀은 채움값(판매됨)이 되지만
+    그 사실을 매트릭스가 들고 다녀야 화면·판정이 매진과 구분할 수 있다.
     """
     seg_count = len(stops) - 1
     if not (0 <= start_idx <= end_idx <= seg_count):
         raise ValueError(f"조회 범위가 올바르지 않다: [{start_idx}, {end_idx}) / 구간 {seg_count}개")
+
+    failed = sorted(set(failed_seg_idxs or ()))
 
     # 유니버스 = 합집합. 좌석 메타(car, seat_no)도 함께 보관한다.
     universe: dict[str, tuple[int, str]] = {}
@@ -75,6 +89,8 @@ def merge_seat_maps(
     for seg_idx in range(start_idx, end_idx):
         seat_map = seat_maps.get(seg_idx)
         if seat_map is None:
+            if seg_idx in failed:
+                continue  # 조회 실패 — 채움값(판매됨)으로 남는다. 아래에서 표시로 구분한다
             raise ValueError(f"구간 {seg_idx}의 좌석맵이 없다 (조회 범위 불일치)")
         by_key: dict[str, bool] = {}
         for seat in seat_map.seats:
@@ -87,6 +103,8 @@ def merge_seat_maps(
     for key, (car, seat_no) in universe.items():
         cells = [UNQUERIED_CELL] * seg_count
         for seg_idx in range(start_idx, end_idx):
+            if seg_idx not in sold_by_seg:
+                continue  # 조회 실패 구간 — 채움값 유지 (D-48)
             cells[seg_idx] = sold_by_seg[seg_idx].get(key, True)  # 부재 = 판매 (D-18)
         rows.append(SeatRow(car=car, seat_no=seat_no, cells=cells))
 
@@ -99,4 +117,5 @@ def merge_seat_maps(
         fetched_at=fetched_at,
         queried_from_idx=start_idx,
         queried_to_idx=end_idx,
+        failed_seg_idxs=[i for i in failed if start_idx <= i < end_idx],
     )

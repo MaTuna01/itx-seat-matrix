@@ -117,5 +117,9 @@ api/ ──> domain/ (순수 함수) <── scheduler/
 `scripts/hooks/pre-commit`이 이를 기계적으로 강제한다 (D-33). 새 클론에서는 한 번
 `git config core.hooksPath scripts/hooks`를 실행해야 켜진다.
 막는 것: ① `.env.example`의 시크릿성 키에 값이 채워진 커밋 ② `.env`의 실제 값이
-들어간 커밋(파일 종류 무관) ③ `.env`·`*.db` 등 커밋 금지 파일.
-시크릿이 아닌 새 설정을 `.env.example`에 값과 함께 넣어야 하면 훅의 `PUBLIC_KEYS`에 추가한다.
+들어간 커밋(파일 종류 무관) ③ `.env`·`*.db`·`*.env` 등 커밋 금지 파일.
+
+**규칙은 `scripts/secret_scan.py`에 있고 훅은 껍데기다** (D-44). 시크릿이 아닌 새 설정을
+`.env.example`에 값과 함께 넣어야 하면 그쪽의 `PUBLIC_KEYS`에 추가한다. CI가 같은 규칙을
+추적 파일 전체에 돌리므로 훅을 켜는 것을 잊어도 ①·③은 막힌다 — **다만 ②는 CI에서
+불가능하다**(러너에 `.env`가 없다). 규칙을 고치면 `tests/test_secret_scan.py`도 함께 고쳐라.

@@ -145,9 +145,14 @@ compose가 `restart: unless-stopped`라 알아서 돌아온다 (D-17 상단 주�
 컨테이너를 돌리는 데 `docker-compose.yml`이 필요하고, 정차역 캐시 재적재 스크립트도
 저장소에서 온다. **서버에 python·uv는 깔지 않는다** — 스크립트는 컨테이너 안에서 돈다.
 
+**운영 서버는 `main`만 본다.** `dev`는 개발기(아이맥)용이다 — 운영이 `dev`를 따라가면
+`git pull` 한 번에 그 사이 머지된 무관한 작업까지 딸려온다. 브랜치를 바꾸는 것만으로는
+컨테이너가 재시작되지 않으니(이미지는 별개다) 언제든 안전하게 전환할 수 있다.
+
 ```bash
 git clone https://github.com/MaTuna01/itx-seat-matrix.git ~/itx-seat-matrix
 cd ~/itx-seat-matrix
+git switch main        # ★ 운영은 main. dev 를 체크아웃하지 마라
 
 # ★ 먼저 확인한다 — 우분투의 기본 사용자 ubuntu 는 uid 1000 이고, 컨테이너도 uid 1000 으로
 #   돈다. 이 두 값이 같아야 바인드 마운트한 data/ 를 컨테이너가 쓸 수 있다
@@ -545,14 +550,19 @@ print(c.execute('select id, substr(endpoint,1,45), created_at from push_device')
 
 ### 재배포
 
+**배포 대상은 `main`이다.** `dev`에서 작업하고, 배포할 때 `dev → main` PR을 올려 머지한
+뒤(소유자가 직접 — CLAUDE.md 6) **양쪽 모두 `main`을 pull한다.** 그래야 "지금 서버에 뭐가
+올라가 있나"가 `main` 하나로 답이 된다.
+
 ```bash
 # M4: 빌드 + 전송
-cd ~/itx-seat-matrix && git pull
+cd ~/itx-seat-matrix
+git switch main && git pull            # ★ 배포는 main 기준으로 빌드한다
 docker build --platform linux/arm64 --provenance=false -t itx-seat-matrix:local .
 docker save itx-seat-matrix:local | gzip | ssh ubuntu@korail-matrix 'gunzip | docker load'
 
 # EC2
-cd ~/itx-seat-matrix && git pull        # compose 파일·스크립트 갱신
+cd ~/itx-seat-matrix && git pull        # compose 파일·스크립트 갱신 (main 추적 중)
 docker compose up -d --no-build
 ./scripts/deploy_check.sh
 ```

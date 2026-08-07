@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { filterStations } from "./hangul";
+import { filterStations } from "../../core/hangul";
 import { st } from "./styles";
 
 // 역 선택 콤보박스 (D-32). 타이핑은 **목록을 좁히기만** 하고,

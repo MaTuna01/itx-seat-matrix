@@ -15,6 +15,10 @@ from app.domain.models import KST, SeatMatrix, SeatRow, StopInfo
 # 프로토타입(seat-matrix.jsx)과 동일한 목업 노선
 STOPS: list[str] = ["천안", "평택", "수원", "안양", "영등포", "서울"]
 ARRIVAL_OFFSETS = [0, 12, 26, 38, 48, 56]
+# 정차 3분. **도착과 출발이 같으면 이슈 #35의 경계를 테스트할 수 없다** — 코레일은
+# 출발한 구간을 팔지 못하므로 "정차 중"과 "주행 중"을 가르는 것이 출발시각이다 (→ D-47).
+# 종착역은 출발이 없어 None이다 (실데이터도 그렇다 — `train_stop` 실측 확인).
+DEPARTURE_OFFSETS: list[int | None] = [3, 15, 29, 41, 51, None]
 RIDE_DATE = date(2026, 8, 5)
 
 
@@ -26,8 +30,12 @@ def at(hour: int, minute: int, second: int = 0) -> datetime:
 def stop_infos(delay_free: bool = True) -> list[StopInfo]:
     base = at(8, 0)
     return [
-        StopInfo(name=name, arrival=base + timedelta(minutes=offset))
-        for name, offset in zip(STOPS, ARRIVAL_OFFSETS)
+        StopInfo(
+            name=name,
+            arrival=base + timedelta(minutes=arr),
+            departure=None if dep is None else base + timedelta(minutes=dep),
+        )
+        for name, arr, dep in zip(STOPS, ARRIVAL_OFFSETS, DEPARTURE_OFFSETS)
     ]
 
 
@@ -38,6 +46,7 @@ def make_matrix(
     fetched_at: datetime | None = None,
     queried_from_idx: int = 0,
     queried_to_idx: int | None = None,
+    failed_seg_idxs: list[int] | None = None,
 ) -> SeatMatrix:
     """`{"3-7A": [True, False, ...]}` → SeatMatrix."""
     stops = stops or STOPS
@@ -53,6 +62,7 @@ def make_matrix(
         fetched_at=fetched_at or at(8, 14),
         queried_from_idx=queried_from_idx,
         queried_to_idx=len(stops) - 1 if queried_to_idx is None else queried_to_idx,
+        failed_seg_idxs=failed_seg_idxs or [],
     )
 
 

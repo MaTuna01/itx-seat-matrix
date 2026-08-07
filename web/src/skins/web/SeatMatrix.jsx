@@ -1,27 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, cacheMatrix, readCachedMatrix } from "./api";
+import { api, cacheMatrix, readCachedMatrix } from "../../core/api";
+import { buildRows, failureSummary, minutesAgo, summarize } from "../../core/format";
 import { st } from "./styles";
 
 // 프로토타입(seat-matrix.jsx)을 API 연동으로 바꾼 화면.
-// 목업 상수(MOCK_RESPONSE)는 GET /api/trains/{train_no}/matrix 응답으로 대체됐고,
-// **판정은 서버(domain/verdict.py)가 계산한 verdict를 그대로 신뢰한다.**
-// 여기서 계산하는 clear_until은 행 정렬·END 태그용 표시 값일 뿐이다.
+// 목업 상수(MOCK_RESPONSE)는 GET /api/trains/{train_no}/matrix 응답으로 대체됐다.
+//
+// **판정 문구는 이 파일이 만들지 않는다** — core/format.js가 문장 조각을 주고 여기서는
+// 강조를 어떻게 그릴지만 정한다 (→ D-50). 스킨마다 문장을 조립하면 web과 iOS가 갈리고,
+// 그러면 뒤처진 쪽이 틀린 정보를 보여주게 된다.
 
-const seatKey = (s) => `${s.car}-${s.seat_no}`;
+const TONE = {
+  ok: "#0e7a4a",
+  warn: "#a05a00",
+  danger: "#c0392b",
+  muted: "#6b7686",
+  navy: "#1a3a6b",
+};
 
-function minutesAgo(iso) {
-  const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
-  return m <= 0 ? "방금" : `${m}분 전`;
-}
-
-// verdict.py의 clear_until과 같은 규칙 (표시 전용)
-function clearUntil(seat, startIdx, alightIdx) {
-  let until = startIdx;
-  for (let i = startIdx; i < alightIdx; i++) {
-    if (seat.cells[i]) break;
-    until = i + 1;
-  }
-  return until;
+// 문장 조각 배열을 그린다. 강조(em)를 <b>로 그리는 것이 web 스킨의 선택이다.
+function Segs({ parts }) {
+  return parts.map((p, i) => (p.em ? <b key={i}>{p.t}</b> : <span key={i}>{p.t}</span>));
 }
 
 export default function SeatMatrix({ subscription, onSubscriptionChange, onReset, onOpenSettings }) {
@@ -102,8 +101,16 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   const { stops, seats, verdict, position_source, delay_minutes } = data;
   const boardIdx = stops.indexOf(data.board_at);
   const alightIdx = stops.indexOf(data.alight_at);
-  // 실효 시작 = max(current_seg_idx, board_idx) — 서버가 이미 적용해 verdict에 담아준다 (D-18)
-  const startIdx = verdict.current_seg_idx;
+  // 실효 시작 = max(팔 수 있는 첫 구간, board_idx) — 서버가 이미 적용해 verdict에 담아준다 (D-18/D-47).
+  // 열차 위치(data.current_seg_idx)와 다르다 — 주행 중이면 이 값이 한 구간 앞선다
+  const startIdx = verdict.start_seg_idx;
+  // 진행바는 **열차 위치**를 그린다 — 판정 시작(startIdx)이 아니다 (→ D-47).
+  // 주행 중에는 startIdx가 한 구간 앞서므로 그대로 쓰면 열차가 한 역 앞에 있는 것처럼 보인다.
+  const posIdx = data.current_seg_idx ?? startIdx;
+  // 조회에 실패한 구간 (→ D-48). **매진과 반드시 구분해서 그린다** — 셀은 bool 하나라
+  // 실패 구간도 '판매됨'으로 내려오므로, 이 집합 없이는 화면이 둘을 구분할 수 없다.
+  // 관측하지 않은 값이 관측값처럼 읽히는 것이 D-31·#35가 밟은 함정이다.
+  const failedSegs = new Set(data.failed_seg_idxs || []);
   const myKey = data.my_seat_no ? `${data.my_car}-${data.my_seat_no}` : null;
   // 표시 범위는 **내 구간(탑승~하차)뿐이다.** `stops`는 전체 노선이지만(D-18 인덱스 규칙)
   // 내 구간 밖은 애초에 조회하지 않으므로 셀이 UNQUERIED_CELL(=판매됨)로 채워져 있다.
@@ -115,23 +122,17 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
     .map((s, i) => ({ from: s, to: stops[boardIdx + i + 1], idx: boardIdx + i }));
   const seated = data.sub_status === "SEATED";
 
-  const rows = (() => {
-    const enriched = seats.map((s) => {
-      const until = clearUntil(s, startIdx, alightIdx);
-      return { ...s, key: seatKey(s), clear_until: until, clear_all: until >= alightIdx };
-    });
-    const sorted = enriched.sort(
-      (a, b) =>
-        b.clear_until - a.clear_until ||
-        (seated ? Math.abs(a.car - data.my_car) - Math.abs(b.car - data.my_car) : a.car - b.car) ||
-        a.seat_no.localeCompare(b.seat_no)
-    );
-    return onlyClear ? sorted.filter((s) => s.clear_all) : sorted;
-  })();
+  // 행 순서와 필터 예외는 core가 정한다 (→ D-49/D-50). myPinned가 true면 최상단이 "내 자리"라
+  // 구분선으로 갈라야 한다 — 안 그러면 내 자리가 1순위 추천으로 읽힌다.
+  const { rows, myPinned } = buildRows({
+    seats, startIdx, alightIdx, seated, myCar: data.my_car, myKey, onlyClear,
+  });
 
-  const bestMove = verdict.move_to.find((m) => m.clear_all);
-  const clearAllCount = verdict.move_to.filter((m) => m.clear_all).length;
   const selectedSeat = rows.find((s) => s.key === selected);
+
+  // 판정 문구 일체 — 문장은 core가 만든다 (→ D-50)
+  const summary = summarize({ verdict, data, stops, startIdx });
+  const failed = failureSummary(failedSegs, stops);
 
   return (
     <div style={st.page}>
@@ -172,22 +173,22 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             <div key={name} style={st.routeStop}>
               <div style={st.routeLineWrap}>
                 {i > boardIdx && (
-                  <div style={{ ...st.routeLine, background: i <= startIdx ? "#1a3a6b" : "#d8dee9" }} />
+                  <div style={{ ...st.routeLine, background: i <= posIdx ? "#1a3a6b" : "#d8dee9" }} />
                 )}
                 <div
                   style={{
                     ...st.routeDot,
-                    background: i <= startIdx ? "#1a3a6b" : "#fff",
-                    borderColor: i <= startIdx ? "#1a3a6b" : "#b7c1d1",
+                    background: i <= posIdx ? "#1a3a6b" : "#fff",
+                    borderColor: i <= posIdx ? "#1a3a6b" : "#b7c1d1",
                   }}
                 />
-                {i === startIdx + 1 && <div className="trainPulse" />}
+                {i === posIdx + 1 && <div className="trainPulse" />}
               </div>
               <span
                 style={{
                   ...st.routeName,
-                  fontWeight: i === startIdx + 1 ? 700 : 400,
-                  color: i === startIdx + 1 ? "#1a3a6b" : "#6b7686",
+                  fontWeight: i === posIdx + 1 ? 700 : 400,
+                  color: i === posIdx + 1 ? "#1a3a6b" : "#6b7686",
                 }}
               >
                 {name}
@@ -198,80 +199,60 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
         </div>
       </header>
 
-      {/* ── 판정 카드 (상태별 분기, D-15/D-16) ── */}
+      {/* ── 판정 카드 (문장은 core/format.js, 여기서는 그리기만) ── */}
       <section style={st.verdict}>
-        {seated ? (
-          <>
-            <div style={st.verdictLine}>
-              <span style={st.seatChip}>내 자리 {data.my_car}호차 {data.my_seat_no}</span>
-              {verdict.my_seat_status === "CLEAR_ALL" && (
-                <span style={{ color: "#0e7a4a", fontWeight: 700 }}>{data.alight_at}까지 안전</span>
-              )}
-              {verdict.my_seat_status === "SOLD_FROM" && (
-                <span style={{ color: "#c0392b", fontWeight: 700 }}>
-                  {verdict.my_seat_sold_from}부터 판매됨
-                </span>
-              )}
-              {verdict.my_seat_status === "UNKNOWN" && (
-                <span style={{ color: "#6b7686", fontWeight: 700 }}>상태 확인 불가</span>
-              )}
-              <button onClick={() => transition({ status: "STANDING" })} style={st.standBtn} disabled={busy}>
-                일어남
-              </button>
-            </div>
-            <p style={st.verdictSub}>
-              {verdict.all_sold_after_current ? (
-                <>남은 구간 잔여 좌석 없음 · <b>지하철 환승</b>이 나을 수 있음</>
-              ) : verdict.my_seat_status === "CLEAR_ALL" ? (
-                <>이동 불필요 · 자리가 팔리면 알림으로 알려드립니다</>
-              ) : bestMove ? (
-                <>
-                  {stops[startIdx + 1]} 도착 전 이동 권장 → <b>{bestMove.car}호차 {bestMove.seat_no}</b>
-                  {clearAllCount > 1 && ` 외 ${clearAllCount - 1}석이 ${data.alight_at}까지 빈 좌석`}
-                </>
-              ) : (
-                <>끝까지 비는 좌석 없음 · 아래에서 최장 구간 좌석 확인</>
-              )}
-            </p>
-          </>
-        ) : (
-          <>
-            <div style={st.verdictLine}>
-              <span style={{ ...st.seatChip, background: "#fdf3e7", color: "#a05a00" }}>입석</span>
-              {verdict.all_sold_after_current ? (
-                <span style={{ color: "#c0392b", fontWeight: 700 }}>앉을 좌석 없음</span>
-              ) : bestMove ? (
-                <span style={{ color: "#0e7a4a", fontWeight: 700 }}>
-                  {stops[startIdx + 1]}부터 착석 가능
-                </span>
-              ) : (
-                <span style={{ color: "#a05a00", fontWeight: 700 }}>일부 구간만 착석 가능</span>
-              )}
-            </div>
-            <p style={st.verdictSub}>
-              {verdict.all_sold_after_current ? (
-                <>남은 구간 잔여 좌석 없음 · <b>지하철 환승</b>이 나을 수 있음</>
-              ) : bestMove ? (
-                <>
-                  추천 <b>{bestMove.car}호차 {bestMove.seat_no}</b> ({data.alight_at}까지 빈 좌석)
-                  {clearAllCount > 1 && ` 외 ${clearAllCount - 1}석`} ·
-                  좌석을 선택해 "이 자리에 앉음"을 누르면 이후 알림이 그 자리 기준으로 옵니다
-                </>
-              ) : (
-                <>끝까지 비는 좌석은 없음 · 아래에서 최장 구간 좌석을 골라 앉으세요</>
-              )}
-            </p>
-          </>
+        <div style={st.verdictLine}>
+          {summary.chip && (
+            <span
+              style={
+                summary.chip.tone === "warn"
+                  ? { ...st.seatChip, background: "#fdf3e7", color: TONE.warn }
+                  : st.seatChip
+              }
+            >
+              {summary.chip.text}
+            </span>
+          )}
+          {summary.status && (
+            <span style={{ color: TONE[summary.status.tone], fontWeight: 700 }}>
+              {summary.status.text}
+            </span>
+          )}
+          {summary.showStandButton && (
+            <button onClick={() => transition({ status: "STANDING" })} style={st.standBtn} disabled={busy}>
+              일어남
+            </button>
+          )}
+        </div>
+        <p style={st.verdictSub}><Segs parts={summary.detail} /></p>
+
+        {/* 지연 착석 목록 — 지금 앉을 수 있는 좌석과 **분리해서** 보여준다 (D-46).
+            섞으면 "지금 앉을 수 있는 자리"인지 구분이 사라진다. */}
+        {summary.later && (
+          <p style={st.verdictSub}>
+            {summary.later.label}: {summary.later.seats}
+          </p>
+        )}
+        {/* 조회 실패 요약 (→ D-48). ⚠는 이 스킨의 어휘라 여기서 붙인다 */}
+        {failed && (
+          <p style={{ ...st.verdictSub, color: TONE.warn }}>
+            ⚠ <Segs parts={failed} />
+          </p>
         )}
         {data.next_poll && (
           <p style={st.nextPoll}>
             다음 자동 조회: {data.next_poll.station} 도착 {data.next_poll.offset_min}분 전
           </p>
         )}
-        {error && <p style={{ ...st.nextPoll, color: "#c0392b" }}>갱신 실패: {error}</p>}
+        {error && <p style={{ ...st.nextPoll, color: TONE.danger }}>갱신 실패: {error}</p>}
       </section>
 
-      {/* ── 필터 + 수동 갱신 ── */}
+      {/* ── 필터 + 수동 갱신 + 매트릭스 ── */}
+      {/* 판단할 것이 없으면 아무것도 그리지 않는다 — 조회 자체를 하지 않아 좌석이 0개다.
+          빈 표를 그리면 "실제로 조회해 보니 전부 매진"으로 읽힌다 (→ D-47).
+          그 판단도 core가 내린다 (summary.showMatrix) — 스킨이 응답 필드를 해석하지 않는다 */}
+      {summary.showMatrix && (
+      <>
       <div style={st.filterRow}>
         <button
           onClick={() => setOnlyClear(!onlyClear)}
@@ -287,6 +268,12 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           <span style={st.legend}>
             <i style={{ ...st.sw, background: "#e9f7ef", borderColor: "#bfe5cf" }} />빈자리
             <i style={{ ...st.sw, background: "#f6d5d0", borderColor: "#eab5ad", marginLeft: 8 }} />판매
+            {failedSegs.size > 0 && (
+              <>
+                <i style={{ ...st.sw, background: "#fdf3e7", borderColor: "#e8c9a0", marginLeft: 8 }} />
+                조회 실패
+              </>
+            )}
           </span>
           <button style={st.refreshBtn} title="지금 조회" onClick={load} disabled={busy}>↻</button>
         </div>
@@ -301,7 +288,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
               {segments.map((seg) => (
                 <th key={seg.idx} style={{ ...st.thSeg, opacity: seg.idx < startIdx ? 0.35 : 1 }}>
                   <div>{seg.from}</div>
-                  <div style={st.thArrow}>↓</div>
+                  <div style={st.thArrow}>{failedSegs.has(seg.idx) ? "?" : "↓"}</div>
                   <div>{seg.to}</div>
                 </th>
               ))}
@@ -311,13 +298,14 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             {rows.map((s) => {
               const isMine = s.key === myKey;
               const isSel = s.key === selected;
+              const sep = myPinned && isMine ? { borderBottom: "2px solid #c6d4ea" } : null;
               return (
                 <tr
                   key={s.key}
                   onClick={() => setSelected(isSel ? null : s.key)}
                   style={{ background: isSel ? "#eef3fb" : "transparent", cursor: "pointer" }}
                 >
-                  <td style={st.tdSeat}>
+                  <td style={{ ...st.tdSeat, ...sep }}>
                     <span style={{ fontWeight: isMine ? 800 : 600 }}>{s.car}-{s.seat_no}</span>
                     {isMine && <span style={st.mineTag}>내자리</span>}
                     {s.clear_all && !isMine && <span style={st.okTag}>END</span>}
@@ -325,15 +313,32 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                   {segments.map((seg) => {
                     const sold = s.cells[seg.idx];
                     const past = seg.idx < startIdx;
+                    // 실패는 지나온 구간보다 먼저 본다 — 조회 범위 안에서만 실패가 생긴다
+                    const unknown = failedSegs.has(seg.idx);
                     return (
-                      <td key={seg.idx} style={st.tdCell}>
+                      <td key={seg.idx} style={{ ...st.tdCell, ...sep }}>
                         <div
                           style={{
                             ...st.cell,
-                            background: past ? "#f0f2f5" : sold ? "#f6d5d0" : "#e9f7ef",
-                            borderColor: past ? "#e2e6eb" : sold ? "#eab5ad" : "#bfe5cf",
+                            ...(unknown ? st.cellUnknown : null),
+                            background: unknown
+                              ? "#fdf3e7"
+                              : past
+                              ? "#f0f2f5"
+                              : sold
+                              ? "#f6d5d0"
+                              : "#e9f7ef",
+                            borderColor: unknown
+                              ? "#e8c9a0"
+                              : past
+                              ? "#e2e6eb"
+                              : sold
+                              ? "#eab5ad"
+                              : "#bfe5cf",
                           }}
-                        />
+                        >
+                          {unknown ? "?" : ""}
+                        </div>
                       </td>
                     );
                   })}
@@ -343,6 +348,9 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           </tbody>
         </table>
       </div>
+
+      </>
+      )}
 
       {/* ── 좌석 선택 액션 바 (D-15 전이 입력) ── */}
       {selectedSeat && selectedSeat.key !== myKey && (

@@ -16,7 +16,14 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from app.domain.models import Alert, AlertKind, SubscriptionStatus, Verdict, seat_key
+from app.domain.models import (
+    Alert,
+    AlertKind,
+    SeatRecommendation,
+    SubscriptionStatus,
+    Verdict,
+    seat_key,
+)
 
 # 합성 우선순위 — 상위가 하위를 본문에 흡수해 폴링 시점당 푸시 1건 (D-20)
 PRIORITY: tuple[AlertKind, ...] = (
@@ -76,16 +83,31 @@ def verdict_hash(verdict: Verdict) -> str:
 
     `move_to` 전체 리스트와 정렬 순서는 제외한다 — 하위 추천의 미세 변동으로
     알림이 나가면 안 된다 (스퍼리어스 발송 방지, D-16).
+
+    **지연 착석 1순위(`later_top`)는 `move_to`가 비었을 때만 넣는다** (→ D-46).
+
+    - 넣지 않으면: "지금은 못 앉지만 수원부터 앉을 수 있는 자리가 생겼다"가 상태 변화로
+      잡히지 않아 **영원히 침묵한다.** 퇴근길에는 그게 유일하게 쓸모 있는 정보다
+    - 무조건 넣으면: **지금 앉을 자리가 있는데도** 지연 착석 목록의 변동만으로 알림이
+      나간다. 앉을 수 있으면 그냥 가서 앉으면 되므로 그 변동은 의사결정과 무관하다 —
+      D-16이 막으려던 스퍼리어스 발송 그 자체다 (실제로 `test_하위_추천만_바뀌면_침묵한다`와
+      `test_열차_진행만으로는_연장_알림이_나가지_않는다`가 잡아냈다)
+
+    즉 **지연 착석은 지금 앉을 자리가 없을 때만 의사결정에 관여한다.**
     """
     top = verdict.move_to[0].key if verdict.move_to else None
+    later = verdict.move_to_later[0] if verdict.move_to_later and not verdict.move_to else None
+    # 좌석이 같아도 "언제부터"가 당겨지면 사용자에게는 다른 정보다
+    later_top = f"{later.key}@{later.clear_from_idx}" if later else None
     if verdict.sub_status is SubscriptionStatus.STANDING:
-        payload = [verdict.current_seg_idx, top, verdict.all_sold_after_current]
+        payload = [verdict.start_seg_idx, top, later_top, verdict.all_sold_after_current]
     else:
         payload = [
             verdict.my_seat_status,
             verdict.my_seat_sold_from,
             verdict.my_seat_clear_until_idx,
             top,
+            later_top,
             verdict.all_sold_after_current,
         ]
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -130,9 +152,16 @@ def evaluate(
     - 해시가 같으면 해시 기반 종류는 침묵한다 (원칙 6: 동일 상태 중복 발송 금지)
     - `SEAT_EXTENDED`는 해시와 무관하게 셀 전이로만 발화한다
     - 여러 종류가 동시 성립하면 **우선순위 합성으로 1건**
+    - 판단할 것이 없으면(`decision_needed=False`) **베이스라인까지 포함해 전부 침묵**한다
     """
     cur_hash = verdict_hash(verdict)
-    start_idx = verdict.current_seg_idx
+    if not verdict.decision_needed:
+        # 이용 구간의 마지막 구간을 달리는 중이다 (→ D-47). 취할 행동이 없는 시점에
+        # 나가는 알림은 전부 오발송이다 — 생존 확인용 베이스라인(D-20)도 예외가 아니다.
+        # 해시는 기록한다: 다음 조회가 이 상태를 "변화"로 오해하지 않게 해야 한다
+        return AlertDecision(alert=None, verdict_hash=cur_hash, cells_snapshot=my_seat_cells)
+
+    start_idx = verdict.start_seg_idx
     baseline = prev_hash is None
     changed = prev_hash != cur_hash
 
@@ -145,7 +174,12 @@ def evaluate(
             kinds.append(AlertKind.ALL_SOLD)
         if verdict.sub_status is SubscriptionStatus.SEATED and verdict.my_seat_status == "SOLD_FROM":
             kinds.append(AlertKind.MY_SEAT_SOLD)
-        if verdict.sub_status is SubscriptionStatus.STANDING and verdict.move_to:
+        # 지연 착석만 있어도 보낸다 (→ D-46). 폴링은 정차역 도착 10분/4분 전이라
+        # "수원부터 4호차"를 미리 알면 그 호차로 걸어가 대기할 수 있다 — 행동 가능한 정보다.
+        # 알림 종류는 늘리지 않는다(8절). 다이제스트 문구만 "수원부터"가 붙는다
+        if verdict.sub_status is SubscriptionStatus.STANDING and (
+            verdict.move_to or verdict.move_to_later
+        ):
             kinds.append(AlertKind.SEATS_AVAILABLE)
     if extended:
         kinds.append(AlertKind.SEAT_EXTENDED)
@@ -198,22 +232,40 @@ def _compose(
     )
 
 
-def _next_station(verdict: Verdict, ctx: AlertContext) -> str:
-    return ctx.station(verdict.current_seg_idx + 1)
+def _start_station(verdict: Verdict, ctx: AlertContext) -> str:
+    """판정이 시작되는 역 = `stops[start_seg_idx]` (→ D-47).
+
+    **`+ 1`이 아니다.** 구간 `i`는 `stops[i] → stops[i+1]`이므로 "구간 i가 비었다"는
+    곧 "`stops[i]`부터 앉을 수 있다"이다. D-46의 지연 착석 문구가 이미 이 규칙을 쓰고
+    있었는데(`station(clear_from_idx)`) 여기만 한 역 뒤를 가리켰다 — 같은 상황에
+    두 가지 답이 나오던 자리다.
+
+    한 역 늦게 안내하면 **그 역에서 앉을 기회를 그대로 놓친다.** 07:14 알림이
+    "수원부터 착석 가능"이라고 하는데 실제로는 평택부터 빈 자리인 식이다.
+    """
+    return ctx.station(verdict.start_seg_idx)
+
+
+def _seat_phrase(r: SeatRecommendation, verdict: Verdict, ctx: AlertContext) -> str:
+    """좌석 하나의 문구. **"언제부터"를 빠뜨리면 지금 앉을 수 있다고 오해한다** (→ D-46)."""
+    until = ctx.alight_station if r.clear_all else ctx.station(r.clear_until_idx)
+    if r.clear_from_idx > verdict.start_seg_idx:
+        return f"{r.car}-{r.seat_no}({ctx.station(r.clear_from_idx)}부터 {until}까지)"
+    return f"{r.car}-{r.seat_no}({until}까지)"
 
 
 def _digest(verdict: Verdict, ctx: AlertContext, config: AlertConfig) -> str:
-    """착석 가능 좌석 다이제스트 — 상위 N석 + "외 M석" (D-20)."""
-    recs = verdict.move_to[: config.digest_limit]
+    """착석 가능 좌석 다이제스트 — 상위 N석 + "외 M석" (D-20).
+
+    지금 앉을 수 있는 좌석을 먼저 채우고, 남는 자리에 지연 착석을 넣는다 (→ D-46).
+    퇴근길처럼 `move_to`가 비면 지연 착석만으로 채워진다.
+    """
+    pool = list(verdict.move_to) + list(verdict.move_to_later)
+    recs = pool[: config.digest_limit]
     if not recs:
         return "앉을 좌석 없음"
-    head = ", ".join(
-        f"{r.car}-{r.seat_no}({ctx.alight_station}까지)"
-        if r.clear_all
-        else f"{r.car}-{r.seat_no}({ctx.station(r.clear_until_idx)}까지)"
-        for r in recs
-    )
-    rest = len(verdict.move_to) - len(recs)
+    head = ", ".join(_seat_phrase(r, verdict, ctx) for r in recs)
+    rest = len(pool) - len(recs)
     return f"{head} 외 {rest}석" if rest > 0 else head
 
 
@@ -224,7 +276,12 @@ def _title(kind: AlertKind, *, verdict: Verdict, ctx: AlertContext) -> str:
         case AlertKind.MY_SEAT_SOLD:
             return f"내 자리 {ctx.my_label} 판매됨"
         case AlertKind.SEATS_AVAILABLE:
-            return f"{_next_station(verdict, ctx)}부터 착석 가능"
+            # 지연 착석만 있으면 "다음 역부터"가 아니라 **실제로 앉을 수 있는 역**을 쓴다.
+            # 제목이 틀리면 알림 목록에서 그것만 보고 잘못 판단한다 (→ D-46)
+            if not verdict.move_to and verdict.move_to_later:
+                first = min(r.clear_from_idx for r in verdict.move_to_later)
+                return f"{ctx.station(first)}부터 착석 가능"
+            return f"{_start_station(verdict, ctx)}부터 착석 가능"
         case AlertKind.SEAT_EXTENDED:
             return f"내 자리 {ctx.my_label} 이용 구간 연장"
         case _:  # pragma: no cover - FETCH_FAILED는 합성 대상이 아니다
@@ -234,9 +291,9 @@ def _title(kind: AlertKind, *, verdict: Verdict, ctx: AlertContext) -> str:
 def _body(kind: AlertKind, *, verdict: Verdict, ctx: AlertContext, config: AlertConfig) -> str:
     match kind:
         case AlertKind.ALL_SOLD:
-            return f"{_next_station(verdict, ctx)} 이후 잔여 없음 → 지하철 환승 고려"
+            return f"{_start_station(verdict, ctx)} 이후 잔여 없음 → 지하철 환승 고려"
         case AlertKind.MY_SEAT_SOLD:
-            sold_from = verdict.my_seat_sold_from or _next_station(verdict, ctx)
+            sold_from = verdict.my_seat_sold_from or _start_station(verdict, ctx)
             top = verdict.move_to[0] if verdict.move_to else None
             if top is None:
                 return f"{ctx.my_label} {sold_from}부터 판매됨 · 옮길 좌석 없음"
@@ -260,11 +317,16 @@ def _short(kind: AlertKind, *, verdict: Verdict, ctx: AlertContext) -> str:
         case AlertKind.ALL_SOLD:
             return "잔여 없음"
         case AlertKind.MY_SEAT_SOLD:
-            sold_from = verdict.my_seat_sold_from or _next_station(verdict, ctx)
+            sold_from = verdict.my_seat_sold_from or _start_station(verdict, ctx)
             return f"{ctx.my_label} {sold_from}부터 판매됨"
         case AlertKind.SEATS_AVAILABLE:
-            top = verdict.move_to[0] if verdict.move_to else None
-            return f"착석 가능 {top.car}-{top.seat_no}" if top else ""
+            if verdict.move_to:
+                top = verdict.move_to[0]
+                return f"착석 가능 {top.car}-{top.seat_no}"
+            if verdict.move_to_later:
+                top = verdict.move_to_later[0]
+                return f"{ctx.station(top.clear_from_idx)}부터 {top.car}-{top.seat_no}"
+            return ""
         case AlertKind.SEAT_EXTENDED:
             return f"{ctx.my_label} 구간 연장"
         case _:  # pragma: no cover

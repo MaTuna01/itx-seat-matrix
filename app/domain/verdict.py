@@ -39,10 +39,18 @@ class EnrichedSeat:
     cells: list[bool]
     clear_until_idx: int
     clear_all: bool
+    # 남은 구간 안에서 가장 긴 연속 빈 구간 (→ D-46). 지금 앉을 수 있으면
+    # best_from_idx == 실효 시작이고, 그렇지 않으면 "그 역부터 앉을 수 있다"는 뜻이다
+    best_from_idx: int
+    best_until_idx: int
 
     @property
     def key(self) -> str:
         return seat_key(self.car, self.seat_no)
+
+    @property
+    def best_len(self) -> int:
+        return self.best_until_idx - self.best_from_idx
 
 
 def clear_until(cells: list[bool], start_idx: int, alight_idx: int) -> int:
@@ -58,12 +66,36 @@ def clear_until(cells: list[bool], start_idx: int, alight_idx: int) -> int:
     return until
 
 
+def longest_free_run(cells: list[bool], start_idx: int, alight_idx: int) -> tuple[int, int]:
+    """`[start_idx, alight_idx)` 안에서 **가장 긴 연속 빈 구간** `(from, until)` (→ D-46).
+
+    `until`은 `clear_until`과 같은 의미의 역 인덱스다 (구간 i가 비면 `until = i + 1`).
+    빈 구간이 하나도 없으면 `(start_idx, start_idx)` — 길이 0이다.
+
+    **길이가 같으면 더 이른 쪽을 고른다.** 같은 값이면 빨리 앉는 편이 낫고, 멀리 있는
+    구간일수록 그때까지 그 자리가 남아 있을 가능성이 낮다 (5절 "빈 좌석 ≠ 착석 가능"의
+    한계는 시간이 갈수록 커진다).
+    """
+    best_from, best_until = start_idx, start_idx
+    run_from: int | None = None
+    for i in range(start_idx, alight_idx):
+        if cells[i]:
+            run_from = None
+            continue
+        if run_from is None:
+            run_from = i
+        if (i + 1) - run_from > best_until - best_from:
+            best_from, best_until = run_from, i + 1
+    return best_from, best_until
+
+
 def enrich_seats(
     seats: list[SeatRow], start_idx: int, alight_idx: int
 ) -> list[EnrichedSeat]:
     out: list[EnrichedSeat] = []
     for seat in seats:
         until = clear_until(seat.cells, start_idx, alight_idx)
+        best_from, best_until = longest_free_run(seat.cells, start_idx, alight_idx)
         out.append(
             EnrichedSeat(
                 car=seat.car,
@@ -71,6 +103,8 @@ def enrich_seats(
                 cells=seat.cells,
                 clear_until_idx=until,
                 clear_all=until >= alight_idx,
+                best_from_idx=best_from,
+                best_until_idx=best_until,
             )
         )
     return out
@@ -98,22 +132,64 @@ def rank_seats(
     return sorted(seats, key=sort_key)
 
 
+def rank_later_seats(
+    seats: list[EnrichedSeat],
+    *,
+    status: SubscriptionStatus,
+    my_car: int | None,
+    config: RankingConfig = DEFAULT_RANKING,
+) -> list[EnrichedSeat]:
+    """지연 착석 좌석 정렬 — **가장 길게 앉아 갈 수 있는 좌석 우선** (→ D-46).
+
+    `rank_seats`와 기준이 다르다. 저쪽은 "지금부터 어디까지"라 `clear_until` 하나로
+    충분하지만, 여기는 시작 시점이 좌석마다 다르므로 **구간 길이**로 비교해야 한다.
+    동률이면 **일찍 앉을 수 있는 쪽**이 위다 (`best_from_idx` 오름차순).
+    """
+    same_car = config.prefer_same_car and status is SubscriptionStatus.SEATED and my_car is not None
+
+    def sort_key(seat: EnrichedSeat) -> tuple:
+        proximity = abs(seat.car - my_car) if same_car else seat.car  # type: ignore[operator]
+        return (-seat.best_len, seat.best_from_idx, proximity, seat.car, seat.seat_no)
+
+    return sorted(seats, key=sort_key)
+
+
 def build_verdict(
     *,
     matrix: SeatMatrix,
     status: SubscriptionStatus,
     board_idx: int,
     alight_idx: int,
-    current_seg_idx: int,
+    sellable_seg_idx: int,
     my_car: int | None = None,
     my_seat_no: str | None = None,
     config: RankingConfig = DEFAULT_RANKING,
 ) -> Verdict:
-    """매트릭스 + 구독 상태 → 판정 (PLAN 5절, D-15/D-18).
+    """매트릭스 + 구독 상태 → 판정 (PLAN 5절, D-15/D-18/D-47).
 
-    실효 시작 = `max(current_seg_idx, board_idx)`. 인덱스는 전부 전체 노선 기준.
+    실효 시작 = `max(팔 수 있는 첫 구간, 탑승역)`. 인덱스는 전부 전체 노선 기준.
+
+    `sellable_seg_idx`에 **열차의 현재 위치를 넣으면 안 된다** — 출발한 구간은 코레일이
+    팔지 않아 빈 응답이 오고, 그것이 '전 좌석 판매됨'으로 읽혀 판정이 뒤집힌다 (이슈 #35).
+    `timeline.sellable_seg_idx()`가 그 값을 만든다.
     """
-    start_idx = min(effective_start_idx(current_seg_idx, board_idx), alight_idx - 1)
+    raw_start = effective_start_idx(sellable_seg_idx, board_idx)
+    if raw_start >= alight_idx:
+        # 이용 구간의 마지막 구간을 달리는 중 — 팔 수 있는 구간이 하나도 없다 (→ D-47).
+        # 여기서 하차역 앞으로 되돌리면(예전 `alight_idx - 1` 클램프) 바로 그 '팔 수 없는
+        # 구간'을 판정 대상으로 삼게 되어 매진 오판이 되살아난다.
+        #
+        # `all_sold_after_current`는 **False**여야 한다. 조회 범위가 비어 매트릭스도
+        # 비는데, 그 상태로 매진 판정식을 돌리면 `all([])`이 공허하게 참이 되어
+        # ALL_SOLD("지하철 환승 고려")가 하차 직전에 발사된다.
+        return Verdict(
+            sub_status=status,
+            decision_needed=False,
+            all_sold_after_current=False,
+            start_seg_idx=alight_idx,
+        )
+
+    start_idx = raw_start
     stops = matrix.stops
     enriched = enrich_seats(matrix.seats, start_idx, alight_idx)
 
@@ -127,16 +203,50 @@ def build_verdict(
         SeatRecommendation(
             car=s.car,
             seat_no=s.seat_no,
+            clear_from_idx=start_idx,  # 지금 앉을 수 있다
             clear_until_idx=s.clear_until_idx,
             clear_all=s.clear_all,
         )
-        # 시작 구간부터 이미 팔린 좌석은 추천이 아니다
+        # 시작 구간부터 이미 팔린 좌석은 **지금** 앉을 수 있는 좌석이 아니다.
+        # 그런 좌석 중 뒤 구간이 비는 것은 아래 move_to_later로 간다 (→ D-46)
         for s in ranked
         if s.clear_until_idx > start_idx
     ][: config.max_recommendations]
 
-    # 내 자리를 포함해 남은 구간에 앉을 수 있는 좌석이 하나도 없으면 환승 판단이 필요하다
-    all_sold = all(s.clear_until_idx <= start_idx for s in enriched)
+    # 지금은 못 앉지만 몇 정거장 뒤부터 앉을 수 있는 좌석 (→ D-46).
+    # 퇴근길처럼 탑승 구간만 매진일 때 위 목록은 비고 이쪽만 찬다.
+    later_pool = [
+        s for s in candidates if s.clear_until_idx <= start_idx and s.best_len > 0
+    ]
+    move_to_later = [
+        SeatRecommendation(
+            car=s.car,
+            seat_no=s.seat_no,
+            clear_from_idx=s.best_from_idx,
+            clear_until_idx=s.best_until_idx,
+            clear_all=s.best_until_idx >= alight_idx,
+        )
+        for s in rank_later_seats(later_pool, status=status, my_car=my_car, config=config)
+    ][: config.max_recommendations]
+
+    # 내 자리를 포함해 남은 구간 [start, alight)에 **빈 셀이 하나도 없을 때만** 매진이다.
+    #
+    # `clear_until` 기준으로 판단하면 안 된다. 그 값은 시작 구간부터 **연속으로** 빈 구간만
+    # 세므로, 시작 구간이 팔려 있으면 뒤가 아무리 비어 있어도 start_idx를 그대로 돌려준다.
+    # 그러면 "시작 구간 매진"이 "남은 전 구간 매진"으로 뒤집히고, 화면은 환승을 권하고
+    # ALL_SOLD 푸시가 나간다 — 정작 몇 정거장 뒤부터는 앉아서 갈 수 있는데도.
+    # 퇴근길(영등포→천안, 영등포-수원만 매진)에서 실제로 겪었다 (→ D-45).
+    all_sold = all(all(seat.cells[start_idx:alight_idx]) for seat in enriched)
+
+    # 조회에 실패한 구간이 남은 범위에 있으면 **매진이라고 말하지 않는다** (→ D-48).
+    # 실패 구간의 셀은 채움값(판매됨)이라 위 식에 그대로 섞여 들어간다 — 그대로 두면
+    # 네트워크가 한 번 튄 것이 "남은 구간 잔여 없음 · 지하철 환승 고려"가 되어 나간다.
+    # 모르는 것을 매진으로 부르지 않는다는 점에서 D-47의 `all([])` 분기와 같은 논리다.
+    #
+    # `clear_until`은 반대로 **그대로 둔다.** 실패 구간에서 멈추는 것이 맞다 —
+    # 그 뒤를 확인하지 못했으므로 "여기까지 확인됨"이 정확한 답이다 (소유자 결정).
+    if any(start_idx <= i < alight_idx for i in matrix.failed_seg_idxs):
+        all_sold = False
 
     my_seat_status = None
     my_seat_sold_from = None
@@ -170,6 +280,7 @@ def build_verdict(
         my_seat_sold_from=my_seat_sold_from,
         my_seat_clear_until_idx=my_seat_clear_until_idx,
         move_to=move_to,
+        move_to_later=move_to_later,
         all_sold_after_current=all_sold,
-        current_seg_idx=start_idx,
+        start_seg_idx=start_idx,
     )

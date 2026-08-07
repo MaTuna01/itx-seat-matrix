@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.adapters.korail2_adapter import CredentialsRequired
+from app.adapters.korail_client import KorailApiError
 from app.adapters.seatmap_fetcher import (
     NO_RETRY,
     RetryPolicy,
@@ -207,7 +208,7 @@ async def test_retry_recovers_from_transient_failure() -> None:
     result = await _run(port, RetryPolicy(attempts=3, delay_seconds=30.0), slept)
     assert port.attempts == 3
     assert slept == [30.0, 30.0]  # 시도 사이에만 대기 (마지막 뒤에는 없음)
-    assert result[0].seats[0].sold is False
+    assert result.maps[0].seats[0].sold is False
 
 
 async def test_retry_gives_up_after_three_attempts() -> None:
@@ -246,3 +247,55 @@ async def test_no_retry_policy_attempts_once() -> None:
     with pytest.raises(ConnectionError):
         await _run(port, NO_RETRY, slept)
     assert port.attempts == 1
+
+
+# ── 구간 단위 실패 격리 (이슈 #40 → D-48) ─────────────────────────────
+class OneBadSegmentPort:
+    """특정 구간만 실패하는 포트. 나머지 구간은 정상 응답한다."""
+
+    def __init__(self, bad_from: str, exc: Exception) -> None:
+        self.bad_from = bad_from
+        self.exc = exc
+        self.calls: list[str] = []
+
+    async def get_seat_map(self, cred, train_no, d, frm, to):  # noqa: ANN001, ANN201
+        self.calls.append(frm)
+        if frm == self.bad_from:
+            raise self.exc
+        return make_map(frm, to, sold=False, fetched_at=at(8, 0))
+
+
+# 구간 3개짜리 노선 — "가운데 하나만 실패"를 만들려면 최소 3구간이 필요하다
+LONG_STOPS = ["천안", "평택", "수원", "안양"]
+
+
+async def test_한_구간이_실패해도_나머지는_살아남는다() -> None:
+    """★ 회귀 방어 (이슈 #40). "수원까지는 앉을 수 있다"가 가장 쓸모 있는 정보인데,
+    한 구간의 실패가 그것까지 통째로 버리고 있었다 (D-36이 매진에만 적용한 판단을 확장).
+    """
+    port = OneBadSegmentPort("평택", KorailApiError("ERR911081", "좌석선택 예약불가"))
+    result = await fetch_segment_maps(
+        port, None, "1004", RIDE_DATE, LONG_STOPS, 0, 3, jitter=None, retry=NO_RETRY
+    )
+    assert result.failed_idxs == [1]
+    assert sorted(result.maps) == [0, 2], "성공한 구간까지 함께 버려졌다"
+    assert isinstance(result.failed[1], KorailApiError)
+
+
+async def test_전_구간이_실패하면_원래_예외를_올린다() -> None:
+    """보여줄 것이 없을 때는 실패가 맞다. 예외 타입이 호출부의 상태코드 매핑에 필요하다."""
+    port = FlakyPort(99, CredentialsRequired("코레일 계정이 연결되지 않았습니다."))
+    with pytest.raises(CredentialsRequired):
+        await fetch_segment_maps(
+            port, None, "1004", RIDE_DATE, STOPS, 0, 2, jitter=None, retry=NO_RETRY
+        )
+
+
+async def test_빈_조회_범위는_실패가_아니다() -> None:
+    """마지막 구간 주행 중 (D-47). 조회할 구간이 없는 것과 전부 실패한 것은 다르다."""
+    port = OneBadSegmentPort("천안", RuntimeError("불려선 안 된다"))
+    result = await fetch_segment_maps(
+        port, None, "1004", RIDE_DATE, STOPS, 2, 2, jitter=None, retry=NO_RETRY
+    )
+    assert result.maps == {} and result.failed == {}
+    assert port.calls == []
