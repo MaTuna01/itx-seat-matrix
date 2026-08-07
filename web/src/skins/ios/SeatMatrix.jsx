@@ -15,6 +15,28 @@ const TONE = { ok: tk.ok, warn: tk.warn, danger: tk.danger, muted: tk.textMuted,
 const Segs = ({ parts }) =>
   parts.map((p, i) => (p.em ? <b key={i}>{p.t}</b> : <span key={i}>{p.t}</span>));
 
+// 매트릭스 열 폭. `tableLayout: fixed`와 짝이다 — 구간 열을 균등하게 만들고,
+// 정차역이 많아 다 못 들어가면 줄이는 대신 가로로 스크롤한다.
+// 112 = "12-12C" + `내 자리` 태그가 잘리지 않는 폭. 태그가 없으면 72로 좁혀 그만큼을
+// 구간에 넘긴다 — 한 열이 더 보인다. 38 = 세 글자 역 이름이 11pt로 들어가는 폭.
+const SEAT_COL = 112;
+const SEAT_COL_NARROW = 72;
+const SEG_MIN = 40;
+
+// `창원중앙`처럼 네 글자가 넘는 역은 한 열에 안 들어간다. 중간에서 접어 두 줄로 만든다 —
+// CSS 줄바꿈에 맡기면 폭이 닿는 데서 끊겨 `창원중`/`앙`이 되고, 그건 읽히지 않는다.
+// 열 폭을 역 이름에 맞춰 넓히는 쪽은 구간이 11개인 노선(창원→수원)에서 가로 스크롤이 배가 된다.
+const wrapStop = (name) => {
+  if (name.length <= 3) return [name];
+  const half = Math.ceil(name.length / 2);
+  return [name.slice(0, half), name.slice(half)];
+};
+
+const StopLabel = ({ name }) =>
+  wrapStop(name).map((line, i) => <div key={i}>{line}</div>);
+// iOS 스킨은 393pt에 갇혀 있고 body 좌우 여백이 16씩이다 (styles.js `screen`·`body`)
+const BODY_W = 393 - 32;
+
 const CELL = {
   unknown: { background: "#fdf3e7", borderColor: "#e8c9a0" },
   past: { background: "#f0f2f5", borderColor: "#e2e6eb" },
@@ -125,6 +147,17 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
     seats, startIdx, alightIdx, seated, myCar: data.my_car, myKey, onlyClear,
   });
   const selectedSeat = rows.find((s) => s.key === selected);
+  // 내 자리는 옮길 대상이 아니므로 바를 띄우지 않는다
+  const showActionBar = !!selectedSeat && selectedSeat.key !== myKey;
+
+  // 좌석 열 폭은 태그(`내 자리`·`END`)가 있을 때만 넓힌다. 태그가 생겼다 사라지면 폭이
+  // 한 번 바뀌지만, 그건 판정 자체가 바뀌는 순간이라 조용히 어긋나 보일 일이 없다.
+  const hasTag = rows.some((s) => s.key === myKey || s.clear_all);
+  const seatCol = hasTag ? SEAT_COL : SEAT_COL_NARROW;
+  const tableW = seatCol + segments.length * SEG_MIN;
+  const scrolls = tableW > BODY_W;
+  // 역당 폭이 이름 하나를 못 담는 지점. 7개까지는 51pt씩 돌아가 세 글자가 들어간다
+  const crowdedRoute = alightIdx - boardIdx + 1 > 7;
 
   // 판정 문구 일체 — 문장은 core가 만든다 (→ D-50)
   const summary = summarize({ verdict, data, stops, startIdx });
@@ -138,7 +171,8 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
         <button style={{ ...st.navAction, textAlign: "right" }} onClick={onOpenSettings}>설정</button>
       </div>
 
-      <div style={{ ...st.body, paddingTop: 8 }}>
+      {/* 액션 바는 고정이므로 그만큼 아래를 비워야 마지막 좌석 행이 가려지지 않는다 */}
+      <div style={{ ...st.body, paddingTop: 8, paddingBottom: showActionBar ? 112 : 24 }}>
         <p style={{ ...st.subtitle, margin: 0 }}>
           {data.board_at} → {data.alight_at} · 자유석
         </p>
@@ -160,11 +194,17 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           </span>
         </div>
 
-        {/* 노선 진행바 — 매트릭스와 같은 범위(내 구간)만 그린다 (→ D-31) */}
+        {/* 노선 진행바 — 매트릭스와 같은 범위(내 구간)만 그린다 (→ D-31).
+            정차역이 많으면 이름이 서로 겹친다(창원→수원은 12개, 역당 30pt) — 30pt에
+            네 글자를 넣을 방법은 없으므로 **이름을 고른다.** 점은 전부 남으니
+            어디까지 왔는지는 그대로 읽히고, 구간별 상세는 아래 매트릭스가 말한다. */}
         <div style={st.routeBar}>
           {stops.slice(boardIdx, alightIdx + 1).map((name, offset) => {
             const i = boardIdx + offset;
             const passed = i <= posIdx;
+            // 출발 · 하차 · 지금 향하는 역만 남긴다
+            const named =
+              !crowdedRoute || i === boardIdx || i === alightIdx || i === posIdx + 1;
             return (
               <div key={name} style={st.routeStop}>
                 <div style={st.routeLineWrap}>
@@ -183,7 +223,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                   fontWeight: i === posIdx + 1 ? 700 : 400,
                   color: i === posIdx + 1 ? tk.brandNavy : tk.textMuted,
                 }}>
-                  {name}
+                  {named ? name : ""}
                 </span>
               </div>
             );
@@ -273,15 +313,17 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             </div>
 
             <div style={st.matrix}>
-              <table style={st.table}>
+              <table style={{ ...st.table, minWidth: tableW }}>
                 <thead>
                   <tr>
-                    <th style={st.thSeat}>좌석</th>
+                    <th style={{ ...st.thSeat, ...st.stickySeat, width: seatCol, background: tk.surface, zIndex: 2 }}>
+                      좌석
+                    </th>
                     {segments.map((seg) => (
                       <th key={seg.idx} style={{ ...st.thSeg, opacity: seg.idx < startIdx ? 0.35 : 1 }}>
-                        <div>{seg.from}</div>
+                        <StopLabel name={seg.from} />
                         <div>{failedSegs.has(seg.idx) ? "?" : "↓"}</div>
-                        <div>{seg.to}</div>
+                        <StopLabel name={seg.to} />
                       </th>
                     ))}
                   </tr>
@@ -297,7 +339,10 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                       <tr key={s.key} className="iosRow"
                         onClick={() => setSelected(isSel ? null : s.key)}
                         style={{ background: isSel ? "#eef3fb" : "transparent", cursor: "pointer" }}>
-                        <td style={{ ...st.tdSeat, ...sep }}>
+                        <td style={{
+                          ...st.tdSeat, ...st.stickySeat, ...sep,
+                          background: isSel ? "#eef3fb" : tk.surface,
+                        }}>
                           <span style={{ fontWeight: isMine ? 800 : 600 }}>{s.car}-{s.seat_no}</span>
                           {isMine && <span style={st.mineTag}>내 자리</span>}
                           {s.clear_all && !isMine && <span style={st.endTag}>END</span>}
@@ -320,13 +365,19 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                 </tbody>
               </table>
             </div>
+            {/* 오른쪽이 잘린 것만으로는 "밀 수 있다"가 안 읽힌다 — 못 본 구간을
+                안 판 자리로 착각할 수 있어서 글자로 말한다 */}
+            {scrolls && <p style={st.scrollHint}>옆으로 밀면 나머지 구간 →</p>}
           </>
         )}
       </div>
 
       {/* ── 좌석 선택 액션 바 (D-15 전이 입력) ── */}
-      {selectedSeat && selectedSeat.key !== myKey ? (
-        <div style={st.actionBar}>
+      {showActionBar ? (
+        <div style={st.actionBar} className="iosActionBar" role="group" aria-label="선택한 좌석">
+          <button style={st.actionClose} aria-label="선택 해제" onClick={() => setSelected(null)}>
+            ✕
+          </button>
           <div>
             <b style={{ fontSize: 15 }}>{selectedSeat.car}-{selectedSeat.seat_no}</b>
             <div style={{ fontSize: 13, color: tk.textMuted }}>
