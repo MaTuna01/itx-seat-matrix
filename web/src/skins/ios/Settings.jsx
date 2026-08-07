@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { describeUser, isDeletable } from "../../core/admin";
 import { api } from "../../core/api";
 import {
   guessDeviceLabel,
@@ -91,6 +92,7 @@ export default function Settings({ user, onBack, onLoggedOut, onUserChange }) {
                 </label>
               </Group>
               <p style={st.footnote}>필요할 때만 잠깐 열고 바로 다시 잠그세요.</p>
+              <AdminUsers user={user} setError={setError} />
             </>
           )}
 
@@ -381,5 +383,103 @@ function DiscordLink({ user, onUserChange, setError }) {
         표시되지 않습니다.
       </p>
     </form>
+  );
+}
+
+// 관리자 사용자 관리 (D-53, 이슈 #54).
+//
+// web 스킨과 동작이 완전히 같다 — 삭제하려면 행이 확인 모드로 펼쳐지고 **내 비밀번호를
+// 다시 입력**해야 한다. 자기 자신·관리자에는 버튼을 그리지 않지만(`isDeletable`),
+// 그 판정은 core에 한 벌만 있고 진짜 거절은 서버가 400으로 한다.
+function AdminUsers({ user, setError }) {
+  const [rows, setRows] = useState(null);
+  const [pending, setPending] = useState(null); // 확인 모드로 펼친 행
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reload = () => api.adminUsers().then(setRows).catch((e) => setError(e.message));
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const cancel = () => {
+    setPending(null);
+    setPassword("");
+  };
+
+  const confirm = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteUser(pending.id, password);
+      cancel();
+      await reload();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const userRows =
+    rows === null
+      ? [<div key="loading" style={st.row}><span style={st.rowValue}>불러오는 중…</span></div>]
+      : rows.flatMap((row) => {
+          const line = (
+            <div key={row.id} style={st.row}>
+              <span style={st.rowLabel}>{row.display_name}</span>
+              {row.is_admin && <span style={{ ...st.chip, ...st.chipNavy }}>관리자</span>}
+              {row.id === user.id && <span style={{ ...st.chip, ...st.chipMuted }}>나</span>}
+              <span style={st.rowValue}>{describeUser(row)}</span>
+              {isDeletable(row, user) && pending?.id !== row.id && (
+                <button
+                  style={st.rowBtn}
+                  disabled={busy}
+                  onClick={() => { setPending(row); setPassword(""); }}
+                >
+                  삭제
+                </button>
+              )}
+            </div>
+          );
+          if (pending?.id !== row.id) return [line];
+          return [
+            line,
+            <form key={`c${row.id}`} onSubmit={confirm}>
+              <div style={st.fieldRow}>
+                <label style={st.fieldLabel} htmlFor="admin_pw">내 비밀번호</label>
+                <input
+                  id="admin_pw" style={st.fieldInput} type="password" value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password" required autoFocus
+                />
+              </div>
+              <button
+                type="submit"
+                style={{ ...st.actionRow, ...st.destructiveRow }}
+                disabled={busy || !password}
+              >
+                {busy ? "…" : `${row.email} 영구 삭제`}
+              </button>
+              <button type="button" style={st.actionRow} onClick={cancel} disabled={busy}>
+                취소
+              </button>
+            </form>,
+          ];
+        });
+
+  return (
+    <>
+      <p style={st.sectionLabel}>가입한 사용자</p>
+      <Group>{rowsWithSeps(userRows)}</Group>
+      <p style={pending ? st.footnoteWarn : st.footnote}>
+        {pending
+          ? `${pending.email} 계정과 그 사람의 구독·알림 기기가 전부 사라집니다. 되돌릴 수 없습니다.`
+          : "삭제하려면 내 비밀번호를 다시 입력해야 합니다."}
+      </p>
+    </>
   );
 }
