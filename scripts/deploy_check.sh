@@ -8,6 +8,12 @@
 # 출근길에 폰으로 SSH해서 "왜 알림이 안 오지"를 볼 때를 위한 것이다 — 12절의
 # 조용히 틀리는 항목들(스왑 / --workers 1 / 바인딩 주소 / serve)을 한 화면에 모은다.
 # **시크릿은 출력하지 않는다** — .env의 값을 읽지 않고 키가 있는지만 본다.
+#
+# ★ **종료 코드가 판정이다** (#22, D-51). `✗`가 하나라도 나오면 1로 끝난다 — CD 워크플로가
+#   배포 직후 이걸 돌려 실패하면 직전 이미지로 자동 롤백한다. `!`(경고)는 0을 유지한다:
+#   경고까지 배포 실패로 치면 "이미지 아키텍처 ?" 같은 사소한 것에 롤백이 걸린다.
+#   기존 항목의 문구·순서는 그대로 두고 **맨 끝에 판정 한 줄만 늘었다** — 출근길에 폰으로
+#   보던 화면이 그대로여야 하기 때문이다.
 
 set -u
 
@@ -16,13 +22,18 @@ OK="✓"
 NG="✗"
 WARN="!"
 
+# 치명 항목 개수. 아래 `fails`(폴링 틱 실패 건수)와 이름이 겹치지 않게 한다
+ng_count=0
+
 hdr() { printf '\n\033[1m── %s\033[0m\n' "$1"; }
 say() { printf '  %s %s\n' "$1" "$2"; }
+# `ng…` 대신 이걸 쓴다. 찍는 것은 같고 카운터만 오른다
+ng() { say "${NG}" "$1"; ng_count=$((ng_count + 1)); }
 
 # ── 1. 컨테이너 ──────────────────────────────────────────────────────
 hdr "컨테이너"
 if ! command -v docker >/dev/null 2>&1; then
-  say "$NG" "docker가 없다"
+  ng "docker가 없다"
   exit 1
 fi
 
@@ -33,7 +44,7 @@ restarts=$(docker inspect --format '{{.RestartCount}}' "$C_NAME" 2>/dev/null || 
 if [ "$state" = "running" ]; then
   say "$OK" "상태: running (health=$health, 재시작 ${restarts}회)"
 else
-  say "$NG" "상태: $state — 컨테이너가 돌지 않는다. docker compose logs app 을 봐라"
+  ng "상태: $state — 컨테이너가 돌지 않는다. docker compose logs app 을 봐라"
 fi
 
 # 재시작이 잦으면 OOM이다. nano는 0.5GB — 스왑 없이는 새벽에 잡아먹힌다 (12절)
@@ -43,7 +54,7 @@ if [ "$restarts" != "?" ] && [ "$restarts" -gt 3 ] 2>/dev/null; then
 fi
 
 oom=$(docker inspect --format '{{.State.OOMKilled}}' "$C_NAME" 2>/dev/null || echo "?")
-[ "$oom" = "true" ] && say "$NG" "직전 종료가 OOMKilled다 — 스왑을 먼저 확인해라"
+[ "$oom" = "true" ] && ng "직전 종료가 OOMKilled다 — 스왑을 먼저 확인해라"
 
 # ── 2. 조용히 틀리는 3개 (12절) ──────────────────────────────────────
 hdr "12절 체크 (조용히 틀리는 것들)"
@@ -62,7 +73,7 @@ fi
 cmd=$(docker inspect --format '{{range .Config.Cmd}}{{.}} {{end}}' "$C_NAME" 2>/dev/null || echo "")
 case "$cmd" in
   *"--workers 1"*) say "$OK" "uvicorn --workers 1" ;;
-  *) say "$NG" "워커 설정을 확인해라 (2개면 폴링·알림이 중복 발사된다, D-17): $cmd" ;;
+  *) ng "워커 설정을 확인해라 (2개면 폴링·알림이 중복 발사된다, D-17): $cmd" ;;
 esac
 
 # (c) 스왑 2GB
@@ -71,7 +82,7 @@ swap_mb=$((swap_kb / 1024))
 if [ "$swap_mb" -ge 1900 ]; then
   say "$OK" "스왑 ${swap_mb}MB"
 else
-  say "$NG" "스왑 ${swap_mb}MB — 2GB를 만들어라 (DEPLOY.md '스왑'). 없으면 새벽에 OOM이 컨테이너를 잡는다"
+  ng "스왑 ${swap_mb}MB — 2GB를 만들어라 (DEPLOY.md '스왑'). 없으면 새벽에 OOM이 컨테이너를 잡는다"
 fi
 
 # (d) 퍼블리시가 루프백으로 묶여 있는가. 0.0.0.0이면 보안그룹만 믿는 상태가 된다
@@ -79,7 +90,7 @@ binding=$(docker inspect --format '{{range $p, $c := .NetworkSettings.Ports}}{{r
 case "$binding" in
   *"127.0.0.1"*) say "$OK" "포트 퍼블리시: $binding" ;;
   "") say "$WARN" "퍼블리시된 포트가 없다" ;;
-  *) say "$NG" "포트가 루프백 밖으로 열려 있다: $binding" ;;
+  *) ng "포트가 루프백 밖으로 열려 있다: $binding" ;;
 esac
 
 # ── 3. 앱 응답 ───────────────────────────────────────────────────────
@@ -89,7 +100,7 @@ if command -v curl >/dev/null 2>&1; then
   if [ "$code" = "200" ]; then
     say "$OK" "GET /healthz → 200"
   else
-    say "$NG" "GET /healthz → $code"
+    ng "GET /healthz → $code"
   fi
 else
   say "$WARN" "curl이 없어 건너뜀 (sudo apt-get install -y curl)"
@@ -108,7 +119,7 @@ if command -v tailscale >/dev/null 2>&1; then
   if printf '%s' "$serve" | grep -q "127.0.0.1:8000"; then
     printf '%s\n' "$serve" | sed 's/^/    /'
   else
-    say "$NG" "serve가 8000을 프록시하지 않는다 — sudo tailscale serve --bg 8000"
+    ng "serve가 8000을 프록시하지 않는다 — sudo tailscale serve --bg 8000"
     printf '%s\n' "$serve" | sed 's/^/    /'
   fi
   # key expiry가 켜져 있으면 반년 뒤 조용히 끊긴다 (12절).
@@ -118,7 +129,7 @@ if command -v tailscale >/dev/null 2>&1; then
     say "$WARN" "이 노드에 key expiry가 남아 있다 — admin 콘솔에서 비활성화해라 (안 하면 반년 뒤 조용히 끊긴다)"
   fi
 else
-  say "$NG" "tailscale이 없다"
+  ng "tailscale이 없다"
 fi
 
 # ── 5. 스케줄러가 실제로 도는가 (D-39 로그) ──────────────────────────
@@ -137,7 +148,7 @@ else
     started_at=$(docker inspect --format '{{.State.StartedAt}}' "$C_NAME" 2>/dev/null | cut -c1-19)
     say "$OK" "스케줄러 기동 확인 (컨테이너 시작 ${started_at:-?} UTC)"
   else
-    say "$NG" "기동 로그가 없다 — SCHEDULER_ENABLED / LOG_LEVEL 을 확인해라 (D-39)"
+    ng "기동 로그가 없다 — SCHEDULER_ENABLED / LOG_LEVEL 을 확인해라 (D-39)"
   fi
 
   say "·" "최근 10분: 폴링 틱 ${ticks}건 / 틱 실패 ${fails}건"
@@ -153,7 +164,7 @@ else
     adapter=${rest#*|}
     case "$sched" in
       true|True|1) : ;;
-      *) say "$NG" "SCHEDULER_ENABLED=$sched — 알림이 아예 오지 않는다" ;;
+      *) ng "SCHEDULER_ENABLED=$sched — 알림이 아예 오지 않는다" ;;
     esac
     case "$level" in
       INFO|DEBUG|info|debug) : ;;
@@ -162,7 +173,7 @@ else
     [ "$adapter" = "korail2" ] || say "$WARN" "ADAPTER=$adapter — mock이면 가짜 좌석으로 알림이 온다"
     say "·" "틱 로그 0건은 조회할 구독이 도래하지 않았다는 뜻이다 (설정은 위에서 확인했다)"
   fi
-  [ "$fails" != "0" ] && say "$NG" "틱 실패가 있다 — docker compose logs app | grep -A20 '폴링 틱 실패'"
+  [ "$fails" != "0" ] && ng "틱 실패가 있다 — docker compose logs app | grep -A20 '폴링 틱 실패'"
   printf '%s' "$logs" | grep -E "폴링 틱|매진|FETCH_FAILED|SECRET_KEY|MACRO ERROR" | tail -8 | sed 's/^/    /'
 fi
 
@@ -179,7 +190,7 @@ if [ -f "$db" ]; then
     say "$WARN" "$db 소유자가 ${owner}다 — 컨테이너는 uid 1000으로 돈다. sudo chown -R 1000:1000 data"
   fi
 else
-  say "$NG" "$db 가 없다 — 개발 DB를 옮겼는지 확인해라 (DEPLOY.md '데이터 이관')"
+  ng "$db 가 없다 — 개발 DB를 옮겼는지 확인해라 (DEPLOY.md '데이터 이관')"
 fi
 
 # ── 7. 디스크 ────────────────────────────────────────────────────────
@@ -187,4 +198,13 @@ hdr "디스크"
 df -h / | tail -1 | sed 's/^/  /'
 say "·" "찼을 때 먼저 죽는 것은 SQLite 쓰기다. docker image prune -a 로 정리한다"
 
+# ── 판정 ─────────────────────────────────────────────────────────────
 printf '\n'
+if [ "$ng_count" -eq 0 ]; then
+  say "$OK" "치명 항목 없음"
+else
+  say "$NG" "치명 항목 ${ng_count}개 — 위의 ✗ 를 봐라"
+fi
+printf '\n'
+
+[ "$ng_count" -eq 0 ] || exit 1

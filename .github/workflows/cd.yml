@@ -1,0 +1,224 @@
+# CD — main에 올라간 코드를 EC2(korail-matrix)에 배포한다 (#22, D-51)
+#
+# **손으로 하던 것을 그대로 옮겼다.** DEPLOY.md 6·9절의 절차 — 네이티브 arm64로 빌드하고
+# `docker save | gzip | ssh 'docker load'` 로 tailnet 위에 밀어 넣고 `compose up -d --no-build`
+# 후 `deploy_check.sh` — 를 러너가 대신 친다. 레지스트리는 여전히 쓰지 않는다 (D-40 유지).
+#
+# 조용히 틀릴 수 있는 자리 셋을 각각 막아 둔다:
+#
+#   폴 포인트   자동 배포 = 컨테이너 재시작이다. 폴 포인트 직전에 재시작하면 그 한 번을
+#               놓친다(D-19의 grace로도 못 막는 구간). `deploy_guard.py`가 DB를 보고 막는다.
+#               **시각을 하드코딩하지 않는다** — 위험한 것은 아침이 아니라 임박한 폴이다
+#   롤백        `deploy_check.sh`가 실패하면 직전 이미지(`:previous`)로 되돌리고 재점검한다.
+#               무인 배포에서 앱이 죽은 채 아침을 맞는 것을 막는 유일한 장치다
+#   커밋 일치   compose·스크립트가 이미지와 **같은 커밋**이어야 한다. `git pull`은 그 보장이
+#               없어서 `git reset --hard <sha>` 를 쓴다
+#
+# 사전 준비(1회)는 DEPLOY.md "CD 사전 준비" 절에 있다 — GitHub 시크릿 2개 + Tailscale ACL.
+
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "폴 포인트 가드를 무시하고 배포한다 (재시작이 폴을 먹을 수 있다)"
+        type: boolean
+        default: false
+
+# ★ `cancel-in-progress: false`. 배포는 중간에 끊으면 안 된다 — 이미지를 load 한 뒤
+#   compose up 전에 취소되면 서버가 어중간한 상태로 남는다. 뒤 실행은 줄을 선다
+concurrency:
+  group: cd
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # 게이트. `ci.yml` 전체(테스트 / arm64 빌드+스모크 / 시크릿 검사)를 그대로 부른다 —
+  # 배포 전 검증을 여기에 복사해 두면 두 벌이 갈린다
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: EC2 배포
+    needs: ci
+    # 네이티브 arm64. QEMU로 빌드하면 실제로 배포하는 아키텍처가 아니게 된다 (D-40)
+    runs-on: ubuntu-24.04-arm
+    environment:
+      name: production
+      url: https://korail-matrix.tail9115e9.ts.net
+    env:
+      TS_HOST: korail-matrix
+      REMOTE_DIR: /home/ubuntu/itx-seat-matrix
+      IMAGE: itx-seat-matrix
+      # 러너는 매번 새 기계다 — host key TOFU가 주는 것이 없다. **이 연결의 신원 보증은
+      # Tailscale ACL(`tag:ci` → korail-matrix:22)이지 SSH host key가 아니다**
+      SSH_OPTS: "-o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: 빌드 (linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          # provenance=false 를 빼면 `docker save` 산출물이 중첩 OCI 인덱스가 되고
+          # 우분투의 docker-ce 가 `docker load` 하지 못할 수 있다 (D-40, DEPLOY.md 6절)
+          provenance: false
+          push: false
+          load: true
+          # 태그는 **compose가 보는 `:local` 하나뿐이다.** 커밋별 태그를 서버에 남기면
+          # 10GB EBS에 이미지가 쌓인다 — 어느 커밋인지는 아래 라벨로 알 수 있다
+          tags: itx-seat-matrix:local
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          # ci.yml 의 build 잡과 같은 캐시를 쓴다 — 게이트에서 방금 지은 것이라 캐시 히트다
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tailscale (tag:ci 임시 노드)
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          # ACL에서 이 태그에 허용된 것은 korail-matrix:22 뿐이다 (DEPLOY.md "CD 사전 준비")
+          tags: tag:ci
+          # admin 콘솔 Machines 목록에서 무엇인지 한눈에 보이게 한다 (일회용 노드다)
+          hostname: gh-cd
+
+      - name: 대상 주소 확인
+        # MagicDNS를 러너에 붙이지 않는다 — tailscaled의 피어 목록에서 100.x 주소를 직접 얻는다.
+        # 이름 해석 설정에 기대지 않으므로 러너 이미지가 바뀌어도 흔들리지 않는다
+        run: |
+          mkdir -p ~/.ssh
+          host=$(tailscale ip -4 "$TS_HOST" 2>/dev/null || sudo tailscale ip -4 "$TS_HOST")
+          [ -n "$host" ] || { echo "::error::$TS_HOST 를 tailnet에서 찾지 못했다"; exit 1; }
+          echo "HOST=$host" >> "$GITHUB_ENV"
+          echo "대상: $TS_HOST ($host)"
+
+      # ── 여기까지는 서버를 건드리지 않았다 ────────────────────────────────
+      - name: 폴 포인트 가드
+        if: ${{ !inputs.force }}
+        # 스크립트를 stdin으로 밀어 넣는다 — **EC2의 작업 트리를 아직 손대지 않는다.**
+        # 여기서 멈추면 서버는 완전히 배포 전 상태로 남는다
+        run: |
+          if ! ssh $SSH_OPTS "ubuntu@$HOST" "python3 - $REMOTE_DIR/data/itx.db" \
+                 < scripts/deploy_guard.py; then
+            echo "::error::임박한 폴 포인트 때문에 배포를 보류했다. 서버는 손대지 않았다 — 그 폴이 지난 뒤 이 워크플로를 Re-run 해라 (급하면 workflow_dispatch 의 force)"
+            exit 1
+          fi
+
+      - name: 가드 무시 경고
+        if: ${{ inputs.force }}
+        run: echo "::warning::force=true — 폴 포인트 가드를 건너뛴다. 재시작이 폴을 먹을 수 있다"
+
+      # ── 여기서부터 서버 상태가 바뀐다 ────────────────────────────────────
+      - name: 롤백 포인터 + 저장소 동기화
+        run: |
+          # 되돌아갈 커밋을 먼저 기억한다. 이미지만 되돌리고 작업 트리를 새 커밋에 두면
+          # **옛 이미지가 새 compose·새 스크립트로 뜬다** — 이 PR처럼 배포 스크립트를
+          # 건드린 커밋에서 정확히 문제가 되는 조합이다
+          prev=$(ssh $SSH_OPTS "ubuntu@$HOST" "cd $REMOTE_DIR && git rev-parse HEAD")
+          echo "PREV_HEAD=$prev" >> "$GITHUB_ENV"
+          echo "직전 커밋: $prev"
+
+          ssh $SSH_OPTS "ubuntu@$HOST" "bash -s ${{ github.sha }}" <<'REMOTE'
+          set -eu
+          DIR=/home/ubuntu/itx-seat-matrix
+          IMAGE=itx-seat-matrix
+          SHA="$1"
+
+          # 지금 떠 있는 이미지를 :previous 로 찍어 둔다. 첫 배포에는 :local 이 없다
+          if docker image inspect "$IMAGE:local" >/dev/null 2>&1; then
+            docker tag "$IMAGE:local" "$IMAGE:previous"
+            echo "롤백 포인터 저장: $IMAGE:previous"
+          else
+            echo "직전 이미지가 없다 (첫 배포) — 롤백 불가 상태로 진행한다"
+          fi
+
+          # compose·스크립트를 **이미지와 같은 커밋**으로 맞춘다. `git pull`은 그 사이
+          # main이 더 진행했으면 다른 커밋을 가져온다
+          cd "$DIR"
+          git fetch --quiet origin main
+          git reset --hard -q "$SHA"
+          echo "작업 트리: $(git rev-parse --short HEAD)"
+          REMOTE
+
+      - name: 이미지 전송
+        id: transfer
+        # 압축해서 ~70MB. 직접 연결이 안 되면 DERP 릴레이를 타므로 몇 분 걸릴 수 있다
+        run: |
+          docker save "$IMAGE:local" | gzip \
+            | ssh $SSH_OPTS "ubuntu@$HOST" 'gunzip | docker load'
+
+      - name: 기동 + 점검
+        run: |
+          ssh $SSH_OPTS "ubuntu@$HOST" 'bash -s' <<'REMOTE'
+          set -eu
+          cd /home/ubuntu/itx-seat-matrix
+
+          docker compose up -d --no-build
+
+          # HEALTHCHECK 의 start-period 가 20초다. 바로 deploy_check.sh 를 돌리면
+          # 아직 안 뜬 앱을 실패로 읽고 **멀쩡한 배포가 롤백된다**
+          for _ in $(seq 40); do
+            s=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' itx 2>/dev/null || echo absent)
+            case "$s" in
+              healthy|none) break ;;
+            esac
+            sleep 3
+          done
+          echo "health=$s"
+
+          ./scripts/deploy_check.sh
+          REMOTE
+
+      - name: 실패 시 롤백
+        # ★ `if: failure()` 만 쓰면 안 된다. 폴 포인트 가드에서 멈춘 경우에도 켜지는데,
+        #   그때 서버의 `:local`은 **지금 잘 돌고 있는 최신 이미지**이고 `:previous`는 그
+        #   앞 세대다 — 되돌리면 멀쩡한 서버를 강등시킨다. 그래서 **새 이미지가 실제로
+        #   서버에 올라간 뒤(transfer 성공)** 실패한 경우로 좁힌다
+        if: failure() && steps.transfer.outcome == 'success'
+        run: |
+          ssh $SSH_OPTS "ubuntu@$HOST" "bash -s ${PREV_HEAD:-}" <<'REMOTE' || true
+          set -u
+          PREV="${1:-}"
+          cd /home/ubuntu/itx-seat-matrix
+          echo "── 컨테이너 로그 (마지막 60줄) ──"
+          docker compose logs --tail 60 app 2>&1 || true
+
+          if ! docker image inspect itx-seat-matrix:previous >/dev/null 2>&1; then
+            echo "::warning::롤백할 :previous 이미지가 없다 — 손으로 확인해라"
+            exit 0
+          fi
+          echo "── 롤백 ──"
+          # 이미지와 작업 트리를 **함께** 되돌린다 (둘 중 하나만 되돌리면 짝이 안 맞는다)
+          docker tag itx-seat-matrix:previous itx-seat-matrix:local
+          [ -n "$PREV" ] && git reset --hard -q "$PREV" && echo "작업 트리: $(git rev-parse --short HEAD)"
+          docker compose up -d --no-build
+          sleep 20
+          ./scripts/deploy_check.sh || echo "::error::롤백 뒤에도 점검이 실패한다 — 손이 필요하다"
+          REMOTE
+          echo "::error::배포가 실패해 직전 이미지로 되돌렸다"
+
+      - name: 정리 + 요약
+        if: always()
+        run: |
+          {
+            echo "### CD"
+            echo ""
+            echo "- 커밋: \`${{ github.sha }}\`"
+            echo "- 결과: **${{ job.status }}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ -n "${HOST:-}" ] || exit 0
+          # :previous 로 밀려난 그 앞 이미지는 태그가 없어져 dangling 이 된다.
+          # 10GB EBS라 쌓이면 SQLite 쓰기부터 죽는다 (deploy_check.sh 디스크 항목)
+          ssh $SSH_OPTS "ubuntu@$HOST" 'docker image prune -f' || true
