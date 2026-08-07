@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, cacheMatrix, readCachedMatrix } from "../../core/api";
-import { buildRows, failureSummary, minutesAgo, summarize } from "../../core/format";
+import { buildRows, failureSummary, minutesAgo, seatWindow, summarize } from "../../core/format";
 import { st, tk } from "./styles";
 
 // 피그마 ios `26:110`(06 입석) · `26:227`(07 착석) · `28:142`(08 오프라인) · `28:258`(09 실패).
@@ -158,6 +158,11 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   const scrolls = tableW > BODY_W;
   // 역당 폭이 이름 하나를 못 담는 지점. 7개까지는 51pt씩 돌아가 세 글자가 들어간다
   const crowdedRoute = alightIdx - boardIdx + 1 > 7;
+  // 많으면 **지금 향하는 역 하나만** 라벨한다. 출발·하차까지 세 개를 남겼더니 셋 중 둘이
+  // 인접한 노선(용산→광주송정: 용산·영등포)에서 그대로 겹쳤다 — 정차역 20개면 노드 간격이
+  // 18pt고 역 이름은 22~33pt다. 간격으로 풀 수 있는 문제가 아니다.
+  // 출발·하차는 바로 위 줄(`용산 → 광주송정 · 자유석`)이 이미 말하므로 중복이었다.
+  const namedIdx = Math.min(Math.max(posIdx + 1, boardIdx), alightIdx);
 
   // 판정 문구 일체 — 문장은 core가 만든다 (→ D-50)
   const summary = summarize({ verdict, data, stops, startIdx });
@@ -195,16 +200,15 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
         </div>
 
         {/* 노선 진행바 — 매트릭스와 같은 범위(내 구간)만 그린다 (→ D-31).
-            정차역이 많으면 이름이 서로 겹친다(창원→수원은 12개, 역당 30pt) — 30pt에
-            네 글자를 넣을 방법은 없으므로 **이름을 고른다.** 점은 전부 남으니
-            어디까지 왔는지는 그대로 읽히고, 구간별 상세는 아래 매트릭스가 말한다. */}
+            정차역이 많으면 이름이 서로 겹치므로 **지금 향하는 역 하나만 라벨한다**
+            (용산→광주송정 20개역 = 역당 18pt, 역 이름은 22~33pt).
+            읽는 사람이 잃는 것은 없다 — 시작·끝은 바로 위 줄이, 진행 정도는 채워진 점이,
+            지나온 구간은 아래 매트릭스의 흐린 열이 말한다. */}
         <div style={st.routeBar}>
           {stops.slice(boardIdx, alightIdx + 1).map((name, offset) => {
             const i = boardIdx + offset;
             const passed = i <= posIdx;
-            // 출발 · 하차 · 지금 향하는 역만 남긴다
-            const named =
-              !crowdedRoute || i === boardIdx || i === alightIdx || i === posIdx + 1;
+            const named = !crowdedRoute || i === namedIdx;
             return (
               <div key={name} style={st.routeStop}>
                 <div style={st.routeLineWrap}>
@@ -378,12 +382,12 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           <button style={st.actionClose} aria-label="선택 해제" onClick={() => setSelected(null)}>
             ✕
           </button>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <b style={{ fontSize: 15 }}>{selectedSeat.car}-{selectedSeat.seat_no}</b>
+            {/* 문장은 core가 만든다 — 지금 팔린 좌석에 "…까지 빈 좌석"을 찍으면
+                판정 카드와 다른 말을 하게 된다 (→ D-52 ⑥) */}
             <div style={{ fontSize: 13, color: tk.textMuted }}>
-              {selectedSeat.clear_all
-                ? `${data.alight_at}까지 빈 좌석`
-                : `${stops[selectedSeat.clear_until]}까지 빈 좌석`}
+              <Segs parts={seatWindow(selectedSeat, { stops, startIdx, alightIdx })} />
             </div>
           </div>
           <button style={st.sitBtn} disabled={busy}

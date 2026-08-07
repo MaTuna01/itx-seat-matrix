@@ -13,6 +13,9 @@
 
 export const seatKey = (s) => `${s.car}-${s.seat_no}`;
 
+// 문장 조각 하나. `em`은 "여기가 핵심"이라는 표시일 뿐이고, 굵게 그릴지 색을 줄지는 스킨이 정한다
+const seg = (t, em) => (em ? { t, em: true } : { t });
+
 export function minutesAgo(iso, now = Date.now()) {
   const m = Math.floor((now - new Date(iso).getTime()) / 60000);
   return m <= 0 ? "방금" : `${m}분 전`;
@@ -33,6 +36,28 @@ export function clearUntil(seat, startIdx, alightIdx) {
 export function seatRange(rec, { stops, alightAt }) {
   const to = rec.clear_all ? alightAt : stops[rec.clear_until_idx];
   return `${stops[rec.clear_from_idx]}부터 ${to}까지`;
+}
+
+// 선택한 좌석의 "언제부터 어디까지" — 매트릭스 행(`cells`)에서 직접 센다.
+// `seatRange`는 서버가 준 추천(`clear_from_idx`)을 쓰지만, 좌석을 눌러 고르는 쪽은
+// 추천 목록에 없는 좌석도 고를 수 있어서 행에서 계산해야 한다.
+//
+// ★ **지금 구간이 팔린 좌석을 조심해야 한다.** `clearUntil`은 그 경우 `startIdx`를 그대로
+// 돌려주는데, 그걸 `${stops[startIdx]}까지 빈 좌석`으로 찍으면 **길이 0인 구간이 문장이 된다** —
+// 화면 아래는 "용산까지 빈 좌석"이라 말하고 판정 카드는 같은 좌석을 "조치원부터 서대전까지"라고
+// 말한다. **한 화면이 서로 다른 말을 하는 순간 사용자는 어느 쪽도 못 믿는다** (실사용 중 발견).
+// 게다가 그 문장 옆에는 "이 자리에 앉음" 버튼이 있다.
+export function seatWindow(seat, { stops, startIdx, alightIdx }) {
+  const until = clearUntil(seat, startIdx, alightIdx);
+  if (until > startIdx) return [seg(`${stops[until]}까지 빈 좌석`)];
+
+  // 지금은 팔렸다 — 남은 구간에서 **처음 비는 구간**을 찾아 그것을 말한다
+  let from = startIdx;
+  while (from < alightIdx && seat.cells[from]) from++;
+  if (from >= alightIdx) return [seg("남은 구간 전부 판매됨")];
+  let to = from;
+  while (to < alightIdx && !seat.cells[to]) to++;
+  return [seg("지금은 빈 자리가 아님 · "), seg(`${stops[from]}부터 ${stops[to]}까지`, true)];
 }
 
 // 매트릭스 행 순서 (→ D-49). 스킨이 각자 정렬하면 web과 iOS가 다른 순서를 보여주게 되고,
@@ -65,8 +90,6 @@ export function buildRows({ seats, startIdx, alightIdx, seated, myCar, myKey, on
   const rows = i === 0 ? visible : [visible[i], ...visible.slice(0, i), ...visible.slice(i + 1)];
   return { rows, myPinned: rows.length > 1 };
 }
-
-const seg = (t, em) => (em ? { t, em: true } : { t });
 
 export function summarize({ verdict, data, stops, startIdx }) {
   const alightAt = data.alight_at;
