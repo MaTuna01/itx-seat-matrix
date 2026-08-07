@@ -134,8 +134,20 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
         (seated ? Math.abs(a.car - data.my_car) - Math.abs(b.car - data.my_car) : a.car - b.car) ||
         a.seat_no.localeCompare(b.seat_no)
     );
-    return onlyClear ? sorted.filter((s) => s.clear_all) : sorted;
+    // 내 자리는 필터 대상이 아니다 (→ D-49). 필터를 켜는 상황이 곧 "내 자리가 팔려서 대안을
+    // 찾는" 상황인데, 내 자리는 clear_all이 아니라 바로 그때 화면에서 사라진다 — 비교 기준이
+    // 없어지므로 대안이 나은지 판단할 수가 없다.
+    const visible = onlyClear ? sorted.filter((s) => s.clear_all || s.key === myKey) : sorted;
+    if (!seated || !myKey) return visible;
+    const i = visible.findIndex((s) => s.key === myKey);
+    // 내 좌석이 매트릭스에 없을 수 있다 — 잔여 전 구간이 팔리면 유니버스에서 사라진다 (D-18).
+    // 그 경우는 판정이 SOLD_FROM으로 따로 답하므로 여기서는 조용히 넘어간다.
+    if (i <= 0) return visible;
+    return [visible[i], ...visible.slice(0, i), ...visible.slice(i + 1)];
   })();
+  // 최상단 행의 뜻이 "가장 오래 앉을 수 있는 좌석"에서 "내 자리"로 바뀌므로, 구분선으로
+  // 갈라 두 번째 행부터가 후보임을 보인다. 안 그러면 내 자리가 1순위 추천으로 읽힌다 (D-49)
+  const myPinned = seated && !!myKey && rows.length > 1 && rows[0].key === myKey;
 
   const bestMove = verdict.move_to.find((m) => m.clear_all);
   const clearAllCount = verdict.move_to.filter((m) => m.clear_all).length;
@@ -381,13 +393,14 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             {rows.map((s) => {
               const isMine = s.key === myKey;
               const isSel = s.key === selected;
+              const sep = myPinned && isMine ? { borderBottom: "2px solid #c6d4ea" } : null;
               return (
                 <tr
                   key={s.key}
                   onClick={() => setSelected(isSel ? null : s.key)}
                   style={{ background: isSel ? "#eef3fb" : "transparent", cursor: "pointer" }}
                 >
-                  <td style={st.tdSeat}>
+                  <td style={{ ...st.tdSeat, ...sep }}>
                     <span style={{ fontWeight: isMine ? 800 : 600 }}>{s.car}-{s.seat_no}</span>
                     {isMine && <span style={st.mineTag}>내자리</span>}
                     {s.clear_all && !isMine && <span style={st.okTag}>END</span>}
@@ -398,7 +411,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                     // 실패는 지나온 구간보다 먼저 본다 — 조회 범위 안에서만 실패가 생긴다
                     const unknown = failedSegs.has(seg.idx);
                     return (
-                      <td key={seg.idx} style={st.tdCell}>
+                      <td key={seg.idx} style={{ ...st.tdCell, ...sep }}>
                         <div
                           style={{
                             ...st.cell,
