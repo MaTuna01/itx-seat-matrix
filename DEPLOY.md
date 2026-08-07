@@ -556,32 +556,78 @@ print(c.execute('select id, substr(endpoint,1,45), created_at from push_device')
 `.github/workflows/cd.yml`이 `main` 푸시에서 자동 배포한다. 저장소에 담을 수 없는 준비물이
 셋 있고, **없으면 워크플로가 `tailscale up`에서 멈춘다.**
 
-**① Tailscale OAuth 클라이언트** — [admin → Settings → OAuth clients](https://login.tailscale.com/admin/settings/oauth).
-`auth_keys` **쓰기** 권한 + 태그 `tag:ci`. 발급된 값을 GitHub 저장소 **Settings → Secrets and
-variables → Actions**에 넣는다:
+**순서를 지켜라 — ACL이 OAuth보다 먼저다.** `tag:ci`가 `tagOwners`에 없으면 OAuth 클라이언트에
+그 태그를 붙일 수 없다.
+
+**① ACL** — admin → Access controls. 러너는 **korail-matrix의 22번 하나만** 열어준다.
+`hosts`의 IP는 `tailscale ip -4 korail-matrix`로 확인한다.
+
+**★ `korail-matrix`에 `tag:server`를 붙인다.** Tailscale SSH는 **`dst`에 사용자(이메일)를
+쓰면 `src`가 같은 사용자여야 한다** — "내 기기 → 내 기기"만 표현할 수 있는 형태라, 태그에서
+출발하는 규칙은 목적지도 태그여야 한다 (`users in dst are only allowed from the same user`).
+
+```jsonc
+"tagOwners": {
+    "tag:ci":     ["ma775100@gmail.com"],
+    "tag:server": ["ma775100@gmail.com"],
+},
+"hosts": { "korail-matrix": "100.x.y.z" },
+
+"grants": [
+    // ★ 기본 템플릿의 {"src": ["*"] …} 를 이걸로 바꾼다. 내 기기들끼리는 그대로 열려 있고,
+    //   **태그는 member가 아니므로** 러너가 이 포괄 규칙을 타지 못한다
+    {"src": ["autogroup:member"], "dst": ["*"], "ip": ["*"]},
+    // 러너에게 허용된 것은 이것뿐이다
+    {"src": ["tag:ci"], "dst": ["tag:server"], "ip": ["tcp:22"]},
+],
+
+"ssh": [
+    // ① 내 기기 → 내 기기 (아이맥 등). 태그가 없는 노드용 — 지우지 마라
+    {"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"],
+     "users": ["autogroup:nonroot", "root"]},
+    // ② 내 기기 → 서버. ★ 태그를 붙이는 순간 korail-matrix 는 autogroup:self 로 잡히지
+    //    않는다. **이 규칙이 없으면 내가 SSH를 잃는다** (인바운드 0개라 되돌릴 길이 없다)
+    {"action": "accept", "src": ["autogroup:member"], "dst": ["tag:server"],
+     "users": ["ubuntu", "autogroup:nonroot"]},
+    // ③ CI 러너 → 서버. "check"가 아니라 "accept"다 — check는 브라우저 재인증을 요구하고
+    //    CI에는 브라우저가 없다
+    {"action": "accept", "src": ["tag:ci"], "dst": ["tag:server"],
+     "users": ["ubuntu"]},
+],
+
+// 선택 — 나중에 ACL을 건드리다 CD를 끊으면 저장이 막힌다
+"tests": [
+    {"src": "tag:ci", "accept": ["korail-matrix:22"], "deny": ["korail-matrix:443"]},
+],
+```
+
+> `grants`(신 문법)를 쓰는 tailnet이면 `acls`(구 문법)를 함께 두지 마라 — 역할이 겹친다.
+
+**③ 태그 붙이기 — 락아웃 주의.** 순서를 지켜라. **먼저 `ssh ubuntu@korail-matrix` 세션을
+하나 열어둔 채로 시작한다** (이미 열린 세션은 ACL을 바꿔도 끊기지 않는다. 보험이다).
+
+1. 위 정책을 저장한다. 아직 태그가 없으므로 규칙 ①이 SSH를 유지한다
+2. **새 터미널**에서 `ssh ubuntu@korail-matrix` 확인
+3. Machines → `korail-matrix` → ⋯ → **Edit ACL tags** → `tag:server`.
+   **`tailscale up`을 다시 돌리지 마라** — 재인증이 걸려 세션이 끊긴다
+4. **다시 새 터미널**에서 `ssh ubuntu@korail-matrix` 확인. 이번엔 규칙 ②를 탄다 — 여기가 관문이다
+
+안 되면 열어둔 세션에서 정책을 되돌린다. 그마저 잃었으면 복구는 **EC2 콘솔에서 보안그룹에
+22번을 임시로 다시 열고 원래 키페어로 접속**하는 경로다 (t4g는 Nitro라 시리얼 콘솔도 된다).
+
+> **덤**: 태그가 붙은 노드는 key expiry가 적용되지 않는다 — 3절이 걱정하던 "반년 뒤 어느 날
+> 조용히 끊긴다"가 구조적으로 사라진다.
+
+**③ OAuth 클라이언트 → GitHub 시크릿** — [admin → Settings → OAuth clients](https://login.tailscale.com/admin/settings/oauth).
+`auth_keys` **쓰기** 권한 + 태그 `tag:ci`. secret은 **이 화면을 벗어나면 다시 못 본다.**
+발급된 값을 GitHub 저장소 **Settings → Secrets and variables → Actions**에 넣는다:
 
 | 시크릿 | 값 |
 |---|---|
 | `TS_OAUTH_CLIENT_ID` | OAuth client ID |
 | `TS_OAUTH_SECRET` | OAuth client secret (`tskey-client-…`) |
 
-**② ACL** — admin → Access controls. 러너는 **korail-matrix의 22번 하나만** 열어준다.
-`hosts`의 IP는 `tailscale ip -4 korail-matrix`로 확인한다.
-
-```jsonc
-"tagOwners": { "tag:ci": ["ma775100@gmail.com"] },
-"hosts":     { "korail-matrix": "100.x.y.z" },
-"acls": [
-  { "action": "accept", "src": ["tag:ci"], "dst": ["korail-matrix:22"] }
-],
-"ssh": [
-  // ★ "check"가 아니라 "accept"다 — check는 브라우저 재인증을 요구하고 CI에는 브라우저가 없다
-  { "action": "accept", "src": ["tag:ci"],
-    "dst": ["ma775100@gmail.com"], "users": ["ubuntu"] }
-]
-```
-
-**③ 확인** — 위 둘을 넣은 뒤 **출근 시간대를 피해** Actions 탭에서 CD를 `workflow_dispatch`로
+**④ 확인** — 위를 다 넣은 뒤 **출근 시간대를 피해** Actions 탭에서 CD를 `workflow_dispatch`로
 한 번 돌린다. 러너가 `gh-cd`라는 이름의 일회용 노드로 tailnet에 들어왔다 나가는 것이
 admin 콘솔 Machines에 보인다.
 

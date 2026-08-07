@@ -3098,6 +3098,13 @@ SSH가 필요해져 tailnet을 안 쓰는 것도 아니게 된다. 부품이 하
 
 **대가는 tailnet에 CI 노드를 들이는 것**이고, ACL로 좁혀 갚는다 — `tag:ci`에 허용된 것은
 `korail-matrix:22` 하나뿐이고, Tailscale SSH 규칙도 `users: ["ubuntu"]`로 못 박는다.
+
+> **이 과정에서 EC2 노드에 `tag:server`를 붙이게 된다.** Tailscale SSH는 `dst`에 사용자를
+> 쓰면 `src`가 같은 사용자여야 해서(`users in dst are only allowed from the same user`),
+> 태그에서 출발하는 규칙은 목적지도 태그여야 하기 때문이다. **부작용이 하나 있다** —
+> 태그가 붙은 노드는 `autogroup:self`에 더 이상 잡히지 않으므로 **내 기기 → 서버 SSH 규칙을
+> 따로 남기지 않으면 스스로 잠긴다** (인바운드 0개라 되돌릴 길이 없다). 절차는 DEPLOY.md 9절.
+> 덤으로 태그 노드는 key expiry가 적용되지 않아, 3절이 걱정하던 만료 침묵이 사라진다.
 OAuth 시크릿이 새도 피해가 거기서 끝난다. 러너는 매번 새 기계라 SSH host key TOFU가 주는
 것이 없다 — **이 연결의 신원 보증은 ACL이지 host key가 아니다**(워크플로에 그렇게 적었다).
 
