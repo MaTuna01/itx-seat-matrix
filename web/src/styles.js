@@ -105,6 +105,17 @@ export const st = {
   },
   tdCell: { padding: "5px 3px", borderBottom: "1px solid #f0f2f5" },
   cell: { height: 22, borderRadius: 5, border: "1px solid" },
+  // 조회 실패 셀 (→ D-48). 색만으로 구분하면 색각 이상·흑백 스크린샷에서 매진과 뭉개진다.
+  // 물음표를 함께 찍어 "모른다"를 글자로도 말한다
+  cellUnknown: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 11,
+    fontWeight: 700,
+    color: "#a05a00",
+    lineHeight: 1,
+  },
   actionBar: {
     position: "sticky", bottom: 12, marginTop: 12,
     display: "flex", alignItems: "center", justifyContent: "space-between",

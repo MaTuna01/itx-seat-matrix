@@ -190,6 +190,33 @@ class TestEffectiveStart:
         assert v.decision_needed is True
         assert v.my_seat_status == "CLEAR_ALL"
 
+    def test_조회_실패_구간은_매진으로_읽히지_않는다(self):
+        """★ 회귀 방어 (이슈 #40 → D-48).
+
+        실패 구간의 셀은 채움값(판매됨)이라 매진 판정식에 그대로 섞인다. 그대로 두면
+        **네트워크가 한 번 튄 것**이 "남은 구간 잔여 없음 · 지하철 환승 고려" 푸시가 된다.
+        모르는 것을 매진이라 부르지 않는다 — D-47의 `all([])` 분기와 같은 논리다.
+        """
+        # 실효 시작(0)부터 전부 채움값이라 매진 판정식으로는 True가 나오는 배치
+        matrix = make_matrix({"4-1B": [T, T, T, T, T]}, failed_seg_idxs=[0, 1, 2, 3, 4])
+        v = build_verdict(
+            matrix=matrix, status=STANDING, board_idx=0, alight_idx=5, sellable_seg_idx=0
+        )
+        assert v.all_sold_after_current is False, "조회 실패가 매진으로 뒤집혔다"
+
+    def test_조회_실패_구간에서_clear_until이_멈춘다(self):
+        """확인 한계다 — 그 뒤를 확인하지 못했으므로 "여기까지 확인됨"이 정확한 답이다.
+
+        안양→영등포(3)가 실제로 비어 있어도 **연속 범위가 아니므로** clear_until에는
+        들어오지 않는다. 대신 D-46의 지연 착석 목록이 그 구간을 주워 간다.
+        """
+        matrix = make_matrix({"4-1B": [F, T, F, F, F]}, failed_seg_idxs=[1])
+        v = build_verdict(
+            matrix=matrix, status=STANDING, board_idx=0, alight_idx=5, sellable_seg_idx=0
+        )
+        assert [r.clear_until_idx for r in v.move_to] == [1]  # 평택까지만 확인됨
+        assert v.all_sold_after_current is False
+
     def test_지나온_구간_추천은_하지_않는다(self):
         matrix = make_matrix({"4-1B": [F, F, T, T, T], "3-7A": [T, T, T, T, T]})
         v = build_verdict(
