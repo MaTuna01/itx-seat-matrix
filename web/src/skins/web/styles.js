@@ -122,9 +122,12 @@ export const st = {
     background: "#fff", border: "1px solid #c6d4ea", borderRadius: 12,
     padding: "10px 12px", boxShadow: "0 4px 16px rgba(20,30,50,.12)",
   },
+  // `whiteSpace`/`flex` — 설명 문구가 길어지면 버튼이 먼저 눌려 두 줄로 깨진다.
+  // 줄어드는 쪽은 설명이고 CTA는 아니다 (→ D-52 ⑥)
   sitBtn: {
     background: "#1a3a6b", color: "#fff", border: "none", borderRadius: 8,
     fontSize: 13, fontWeight: 700, padding: "8px 14px", cursor: "pointer",
+    whiteSpace: "nowrap", flex: "0 0 auto",
   },
   foot: { textAlign: "center", fontSize: 11.5, color: "#9aa4b2", marginTop: 14, lineHeight: 1.6 },
 

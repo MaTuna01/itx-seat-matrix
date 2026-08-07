@@ -6,7 +6,7 @@
 //
 // CI에는 아직 붙어 있지 않다 (test 잡이 파이썬 전용). 붙이는 것은 별도 판단이다.
 
-import { summarize, buildRows, failureSummary } from "../src/core/format.js";
+import { summarize, buildRows, failureSummary, seatWindow } from "../src/core/format.js";
 import { skinForDevice } from "../src/core/skin.js";
 
 const stops = ["수원", "안양", "영등포", "용산", "청량리"];
@@ -95,7 +95,21 @@ eq("입석 1행 = 가장 오래 앉는 좌석", r.rows[0].key, "4-12C");
 r = buildRows({ seats, startIdx: 0, alightIdx: 4, seated: true, myCar: 3, myKey: "3-없음", onlyClear: false });
 eq("내 좌석이 매트릭스에 없으면 조용히 통과 (D-18)", r.myPinned, false);
 
-// 8. 스킨 판별 (D-50) — 기준은 "iOS 기기냐 아니냐"다. 맥이냐 아니냐가 아니다.
+// 8. 선택한 좌석의 구간 문구 (→ D-52 ⑥)
+// 실기기에서 발견한 버그: 지금 팔린 좌석에 "{탑승역}까지 빈 좌석"이라는 **길이 0인 구간**이
+// 찍혔다. 같은 화면의 판정 카드는 그 좌석을 "조치원부터 서대전까지"로 맞게 말하고 있었다.
+const win = (cells, startIdx = 0) => txt(seatWindow({ cells }, { stops, startIdx, alightIdx: 4 }));
+eq("끝까지 빈 좌석", win([false, false, false, false]), "청량리까지 빈 좌석");
+eq("도중까지 빈 좌석", win([false, false, true, true]), "영등포까지 빈 좌석");
+eq("★ 지금 팔렸고 뒤에 빈다", win([true, true, false, false]), "지금은 빈 자리가 아님 · 영등포부터 청량리까지");
+eq("지금 팔렸고 중간만 빈다", win([true, false, false, true]), "지금은 빈 자리가 아님 · 안양부터 용산까지");
+eq("한 구간만 비어도 말한다", win([true, true, true, false]), "지금은 빈 자리가 아님 · 용산부터 청량리까지");
+eq("남은 구간 전부 팔림", win([true, true, true, true]), "남은 구간 전부 판매됨");
+// 실효 시작이 뒤로 밀린 경우 — 지나온 구간의 판매 여부는 문구에 끼어들면 안 된다 (D-18/D-47)
+eq("실효 시작 뒤에서 시작", win([true, false, true, false], 2), "지금은 빈 자리가 아님 · 용산부터 청량리까지");
+eq("실효 시작부터 비면 그냥 빈 좌석", win([true, true, false, false], 2), "청량리까지 빈 좌석");
+
+// 9. 스킨 판별 (D-50) — 기준은 "iOS 기기냐 아니냐"다. 맥이냐 아니냐가 아니다.
 const UA = {
   winChrome: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
   mac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",

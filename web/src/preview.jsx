@@ -118,10 +118,15 @@ const LONGEST_MATRIX = {
   alight_at: "광주송정",
   current_seg_idx: 0,
   next_poll: { station: "영등포", offset_min: 10 },
+  // 1-1은 실기기 화면과 같은 모양으로 고정한다 — 지금 구간부터 팔려 있고 조치원~서대전만
+  // 빈다. `move_to_later`와 반드시 일치해야 한다: 어긋나면 판정 카드와 액션 바가 다른 역을
+  // 말하고, 그건 **고치려는 버그와 똑같이 생긴 픽스처 버그**라 확인이 무의미해진다.
   seats: Array.from({ length: 14 }, (_, i) => ({
     car: 1,
     seat_no: `${i + 1}`,
-    cells: LONGEST_STOPS.slice(0, -1).map((_, j) => j < 5 || (i + j) % 4 !== 0),
+    cells: LONGEST_STOPS.slice(0, -1).map((_, j) =>
+      i === 0 ? j < 5 || j > 7 : j < 5 || (i + j) % 4 !== 0
+    ),
   })),
   verdict: {
     ...CANNED["/matrix"].verdict,

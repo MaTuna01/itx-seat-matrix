@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, cacheMatrix, readCachedMatrix } from "../../core/api";
-import { buildRows, failureSummary, minutesAgo, summarize } from "../../core/format";
+import { buildRows, failureSummary, minutesAgo, seatWindow, summarize } from "../../core/format";
 import { st, tk } from "./styles";
 
 // 피그마 ios `26:110`(06 입석) · `26:227`(07 착석) · `28:142`(08 오프라인) · `28:258`(09 실패).
@@ -382,12 +382,12 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           <button style={st.actionClose} aria-label="선택 해제" onClick={() => setSelected(null)}>
             ✕
           </button>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <b style={{ fontSize: 15 }}>{selectedSeat.car}-{selectedSeat.seat_no}</b>
+            {/* 문장은 core가 만든다 — 지금 팔린 좌석에 "…까지 빈 좌석"을 찍으면
+                판정 카드와 다른 말을 하게 된다 (→ D-52 ⑥) */}
             <div style={{ fontSize: 13, color: tk.textMuted }}>
-              {selectedSeat.clear_all
-                ? `${data.alight_at}까지 빈 좌석`
-                : `${stops[selectedSeat.clear_until]}까지 빈 좌석`}
+              <Segs parts={seatWindow(selectedSeat, { stops, startIdx, alightIdx })} />
             </div>
           </div>
           <button style={st.sitBtn} disabled={busy}
