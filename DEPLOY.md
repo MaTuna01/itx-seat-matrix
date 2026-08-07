@@ -595,22 +595,30 @@ print(c.execute('select id, substr(endpoint,1,45), created_at from push_device')
      "users": ["ubuntu"]},
 ],
 
-// 선택 — 나중에 ACL을 건드리다 CD를 끊으면 저장이 막힌다
-"tests": [
-    {"src": "tag:ci", "accept": ["korail-matrix:22"], "deny": ["korail-matrix:443"]},
-],
 ```
 
 > `grants`(신 문법)를 쓰는 tailnet이면 `acls`(구 문법)를 함께 두지 마라 — 역할이 겹친다.
+>
+> **`tests`는 아직 넣지 마라.** ACL 테스트는 *지금 tailnet에 있는 기기*로 평가하는데
+> `korail-matrix`에 태그가 붙기 전에는 `dst: tag:server`에 걸리는 기기가 없어
+> `want: Accept, got: Drop`으로 **저장 자체가 막힌다** (닭·달걀이다). 아래 ②의 5번에서
+> 태그를 붙인 뒤에 추가한다.
 
-**③ 태그 붙이기 — 락아웃 주의.** 순서를 지켜라. **먼저 `ssh ubuntu@korail-matrix` 세션을
+**② 태그 붙이기 — 락아웃 주의.** 순서를 지켜라. **먼저 `ssh ubuntu@korail-matrix` 세션을
 하나 열어둔 채로 시작한다** (이미 열린 세션은 ACL을 바꿔도 끊기지 않는다. 보험이다).
 
-1. 위 정책을 저장한다. 아직 태그가 없으므로 규칙 ①이 SSH를 유지한다
+1. 위 정책을 저장한다 (`tests` 없이). 아직 태그가 없으므로 규칙 ①이 SSH를 유지한다
 2. **새 터미널**에서 `ssh ubuntu@korail-matrix` 확인
 3. Machines → `korail-matrix` → ⋯ → **Edit ACL tags** → `tag:server`.
    **`tailscale up`을 다시 돌리지 마라** — 재인증이 걸려 세션이 끊긴다
 4. **다시 새 터미널**에서 `ssh ubuntu@korail-matrix` 확인. 이번엔 규칙 ②를 탄다 — 여기가 관문이다
+5. 이제 `tests`를 넣고 저장한다. 이번엔 통과한다:
+
+```jsonc
+"tests": [
+    {"src": "tag:ci", "accept": ["korail-matrix:22"], "deny": ["korail-matrix:443"]},
+],
+```
 
 안 되면 열어둔 세션에서 정책을 되돌린다. 그마저 잃었으면 복구는 **EC2 콘솔에서 보안그룹에
 22번을 임시로 다시 열고 원래 키페어로 접속**하는 경로다 (t4g는 Nitro라 시리얼 콘솔도 된다).
