@@ -299,8 +299,11 @@ export const st = {
     width: 44, height: 44, marginLeft: -12, flex: "0 0 auto",
     border: "none", background: "none", color: tk.textMuted, fontSize: 17, cursor: "pointer",
   },
+  // 문구가 길어지면(`지금은 빈 자리가 아님 · …`) 버튼이 먼저 눌려 두 줄로 깨진다.
+  // **CTA는 한 줄이어야 한다** — 줄어드는 쪽은 설명이고, 버튼은 아니다.
   sitBtn: {
-    marginLeft: "auto", height: 44, padding: "0 18px", borderRadius: 12, border: "none",
+    marginLeft: "auto", flex: "0 0 auto", whiteSpace: "nowrap",
+    height: 44, padding: "0 18px", borderRadius: 12, border: "none",
     background: tk.brandNavy, color: tk.onBrand, fontSize: 15, fontWeight: 700, cursor: "pointer",
   },
   hintBar: { padding: "12px 16px 16px", fontSize: 13, color: tk.textMuted, lineHeight: 1.4, flex: "0 0 auto" },

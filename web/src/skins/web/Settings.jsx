@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { describeUser, isDeletable } from "../../core/admin";
 import { api } from "../../core/api";
 import {
   guessDeviceLabel,
@@ -72,6 +73,7 @@ export default function Settings({ user, onBack, onLoggedOut, onUserChange }) {
                 필요할 때만 잠깐 열고 바로 다시 잠그세요.
               </span>
             </div>
+            <AdminUsers user={user} setError={setError} />
           </>
         )}
 
@@ -359,5 +361,110 @@ function DiscordLink({ user, onUserChange, setError }) {
         저장하고 다시 표시되지 않습니다.
       </p>
     </form>
+  );
+}
+
+// 관리자 사용자 관리 (D-53, 이슈 #54).
+//
+// 삭제는 **비밀번호 재입력을 거쳐야만** 실행된다. 목록에서 바로 지워지지 않고 한 행이
+// "확인 모드"로 펼쳐지므로 잘못 누른 것을 되돌릴 자리가 한 번 생긴다.
+// 자기 자신·관리자에는 버튼을 그리지 않지만 그건 편의일 뿐이고, 진짜 거절은 서버가 한다.
+function AdminUsers({ user, setError }) {
+  const [rows, setRows] = useState(null);
+  const [pending, setPending] = useState(null); // 확인 모드로 펼친 행
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reload = () => api.adminUsers().then(setRows).catch((e) => setError(e.message));
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const cancel = () => {
+    setPending(null);
+    setPassword("");
+  };
+
+  const confirm = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteUser(pending.id, password);
+      cancel();
+      await reload();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <label style={st.label}>가입한 사용자</label>
+      {rows === null ? (
+        <p style={st.dim}>불러오는 중…</p>
+      ) : (
+        rows.map((row) => (
+          <div key={row.id} style={{ borderTop: "1px solid #f0f2f5", padding: "8px 0" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14 }}>
+                  {row.display_name}
+                  {row.is_admin && (
+                    <span style={{ ...st.pill, ...st.pillSeated, marginLeft: 6 }}>관리자</span>
+                  )}
+                  {row.id === user.id && (
+                    <span style={{ ...st.pill, ...st.pillEst, marginLeft: 6 }}>나</span>
+                  )}
+                </div>
+                <div style={st.dim}>{row.email} · {describeUser(row)}</div>
+              </div>
+              {isDeletable(row, user) && pending?.id !== row.id && (
+                <button
+                  style={{ ...st.filterBtn, color: "#c0392b", borderColor: "#eab5ad" }}
+                  onClick={() => { setPending(row); setPassword(""); }}
+                >
+                  삭제
+                </button>
+              )}
+            </div>
+
+            {pending?.id === row.id && (
+              <form onSubmit={confirm} style={{ marginTop: 8 }}>
+                <p style={{ ...st.dim, color: "#c0392b", margin: "0 0 6px" }}>
+                  {row.email} 계정과 그 사람의 구독·알림 기기가 전부 사라집니다. 되돌릴 수 없습니다.
+                </p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    style={{ ...st.input, flex: 1 }}
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="확인을 위해 내 비밀번호"
+                    autoComplete="current-password"
+                    required
+                    autoFocus
+                  />
+                  <button
+                    type="submit"
+                    style={{ ...st.filterBtn, background: "#c0392b", color: "#fff", borderColor: "#c0392b" }}
+                    disabled={busy || !password}
+                  >
+                    {busy ? "…" : "삭제"}
+                  </button>
+                  <button type="button" style={st.filterBtn} onClick={cancel} disabled={busy}>
+                    취소
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        ))
+      )}
+    </>
   );
 }

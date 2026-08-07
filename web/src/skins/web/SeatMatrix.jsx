@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, cacheMatrix, readCachedMatrix } from "../../core/api";
-import { buildRows, failureSummary, minutesAgo, summarize } from "../../core/format";
+import { buildRows, failureSummary, minutesAgo, seatWindow, summarize } from "../../core/format";
 import { st } from "./styles";
 
 // 프로토타입(seat-matrix.jsx)을 API 연동으로 바꾼 화면.
@@ -355,12 +355,12 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
       {/* ── 좌석 선택 액션 바 (D-15 전이 입력) ── */}
       {selectedSeat && selectedSeat.key !== myKey && (
         <div style={st.actionBar}>
-          <div style={{ fontSize: 13 }}>
+          <div style={{ fontSize: 13, minWidth: 0 }}>
             <b>{selectedSeat.car}-{selectedSeat.seat_no}</b>
+            {/* 문장은 core가 만든다 — 지금 팔린 좌석에 "…까지 빈 좌석"을 찍으면
+                판정 카드와 다른 말을 하게 된다 (→ D-52 ⑥) */}
             <span style={{ color: "#6b7686", marginLeft: 6 }}>
-              {selectedSeat.clear_all
-                ? `${data.alight_at}까지 빈 좌석`
-                : `${stops[selectedSeat.clear_until]}까지 빈 좌석`}
+              <Segs parts={seatWindow(selectedSeat, { stops, startIdx, alightIdx })} />
             </span>
           </div>
           <button
