@@ -432,7 +432,7 @@ function AdminUsers({ user, setError }) {
             <div key={row.id} style={st.row}>
               <span style={st.rowLabel}>{row.display_name}</span>
               {row.is_admin && <span style={{ ...st.chip, ...st.chipNavy }}>관리자</span>}
-              {row.id === user.id && <span style={st.chip}>나</span>}
+              {row.id === user.id && <span style={{ ...st.chip, ...st.chipMuted }}>나</span>}
               <span style={st.rowValue}>{describeUser(row)}</span>
               {isDeletable(row, user) && pending?.id !== row.id && (
                 <button
