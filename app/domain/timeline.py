@@ -34,6 +34,19 @@ def effective_arrival(stop: StopInfo, delay_min: int) -> datetime:
     return stop.arrival + timedelta(minutes=delay_min)
 
 
+def effective_departure(stop: StopInfo, delay_min: int) -> datetime:
+    """실효 출발시각 = 시각표 출발시각 + 지연분 (→ D-47).
+
+    `departure`가 없으면 `arrival`로 떨어진다. 실데이터에서 출발시각이 비는 것은
+    **종착역뿐**이고(`train_stop` 실측: 여객승하차 8220건 전부 채워져 있다) 종착역은
+    구간의 시작이 될 수 없으므로, 이 폴백은 캐시가 부실할 때를 위한 방어다.
+
+    폴백 방향을 "도착 즉시 출발"로 잡은 이유: 늦게 판단하면 **팔 수 없는 구간을 계속
+    조회하는 원래 버그**로 돌아간다. 일찍 판단하면 정차 몇 분간의 정보를 잃을 뿐이다.
+    """
+    return (stop.departure or stop.arrival) + timedelta(minutes=delay_min)
+
+
 def estimate_seg(stops: list[StopInfo], delay_min: int, now: datetime) -> int:
     """현재 구간 인덱스 = `max i s.t. 실효도착(stops[i]) <= now` (PLAN 5절 시각 규칙).
 
@@ -57,6 +70,43 @@ def estimate_seg(stops: list[StopInfo], delay_min: int, now: datetime) -> int:
             idx = i
         else:
             break
+    return min(idx, len(stops) - 2)
+
+
+def sellable_seg_idx(
+    stops: list[StopInfo],
+    delay_min: int,
+    now: datetime,
+    *,
+    position_idx: int | None = None,
+) -> int:
+    """**아직 팔 수 있는 첫 구간** 인덱스 (→ D-47). 조회 범위·판정의 시작점이다.
+
+    `estimate_seg`(열차가 지금 어디 있나)와 **의도적으로 다른 함수**다. 두 값을 하나로
+    쓴 것이 이슈 #35의 원인이었다:
+
+    - 위치는 도착시각으로 정해진다 — 역을 지났으면 그 구간을 달리는 중이다
+    - 판매 가능 여부는 **출발시각**으로 정해진다 — 출발한 구간은 코레일이 팔지 않는다
+      (실측: `ScheduleView`가 열차를 목록에서 뺀다 / `ERR911081 좌석선택 예약불가`)
+
+    그래서 규칙은 한 줄이다: **출발했으면 다음 구간, 정차 중이면 그 구간.**
+    운행 중인 구간을 조회해봐야 빈 응답이고, 그 빈 응답은 D-18의 부재 추론을 타고
+    '전 좌석 판매됨'이 되어 판정을 뒤집는다.
+
+    `position_idx`는 GPS 보정값 주입구다 (D-13). GPS는 주행 중인 구간을 정확히 짚으므로
+    보정을 그대로 조회에 쓰면 오히려 이 버그를 더 확실히 밟는다 — 반드시 이 함수를 거친다.
+
+    반환값은 구간 인덱스이므로 `[0, len(stops) - 2]`로 클램프한다. 하차역 기준 클램프는
+    호출부(`query_range`)의 몫이다 — 여기는 이용 구간을 모른다.
+    """
+    if len(stops) < 2:
+        raise ValueError("stops는 최소 2개 이상이어야 한다")
+    now = _require_aware(now)
+
+    idx = estimate_seg(stops, delay_min, now) if position_idx is None else position_idx
+    idx = min(max(idx, 0), len(stops) - 2)
+    if effective_departure(stops[idx], delay_min) <= now:
+        idx += 1
     return min(idx, len(stops) - 2)
 
 
