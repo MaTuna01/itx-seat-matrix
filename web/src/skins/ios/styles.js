@@ -140,6 +140,51 @@ export const st = {
     cursor: "pointer", padding: "8px 0 8px 8px", flex: "0 0 auto",
   },
 
+  // ── 내비게이션 바 44pt (설계 규칙) ──
+  navBar: { display: "flex", alignItems: "center", height: 44, padding: "0 16px", flex: "0 0 auto" },
+  navTitle: { flex: 1, textAlign: "center", fontSize: 17, fontWeight: 700 },
+  navAction: {
+    minWidth: 64, border: "none", background: "none", color: tk.brandNavy,
+    fontSize: 17, cursor: "pointer", padding: 0,
+  },
+
+  // ── 세그먼트 44pt — 흔들리는 열차 안 오조작 방지 (설계 규칙) ──
+  segment: { display: "flex", gap: 2, height: 44, padding: 3, borderRadius: 10, background: tk.fillTrack },
+  segmentItem: {
+    flex: 1, border: "none", borderRadius: 8, background: "transparent",
+    color: tk.textPrimary, fontSize: 15, cursor: "pointer", padding: 0,
+  },
+  segmentItemOn: { background: tk.surface, fontWeight: 700, boxShadow: "0 1px 3px rgba(0,0,0,.12)" },
+
+  // ── 검색 필드 (역 검색 시트) ──
+  searchField: {
+    display: "flex", alignItems: "center", height: 40, margin: "0 16px",
+    padding: "0 12px", borderRadius: 10, background: tk.fillTrack,
+  },
+  searchInput: {
+    flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent",
+    fontSize: 17, color: tk.textPrimary, padding: 0,
+  },
+  // 검색 결과 행 — 좌우 여백 없이 시트 폭을 꽉 채운다
+  pickItem: {
+    display: "flex", alignItems: "center", width: "100%", minHeight: 50, padding: "0 16px",
+    border: "none", background: "none", font: "inherit", fontSize: 17, textAlign: "left",
+    color: tk.textPrimary, cursor: "pointer",
+  },
+
+  // ── 열차 행 ──
+  trainRow: {
+    display: "flex", alignItems: "center", gap: 10, width: "100%", minHeight: 68,
+    padding: "0 16px", border: "none", background: "none", font: "inherit",
+    textAlign: "left", cursor: "pointer",
+  },
+  trainBadge: {
+    fontSize: 13, fontWeight: 800, color: tk.onBrand, background: tk.textMuted,
+    borderRadius: 6, padding: "4px 8px", flex: "0 0 auto",
+  },
+  trainNo: { fontSize: 17, fontWeight: 700 },
+  trainTime: { marginLeft: "auto", fontSize: 15, color: tk.textMuted, fontVariantNumeric: "tabular-nums" },
+
   chip: {
     fontSize: 13, fontWeight: 700, height: 28, lineHeight: "28px",
     padding: "0 10px", borderRadius: 14, border: "1px solid", flex: "0 0 auto",
