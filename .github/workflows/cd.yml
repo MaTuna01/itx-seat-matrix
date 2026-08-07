@@ -110,8 +110,11 @@ jobs:
         # 스크립트를 stdin으로 밀어 넣는다 — **EC2의 작업 트리를 아직 손대지 않는다.**
         # 여기서 멈추면 서버는 완전히 배포 전 상태로 남는다
         run: |
-          ssh $SSH_OPTS "ubuntu@$HOST" "python3 - $REMOTE_DIR/data/itx.db" \
-            < scripts/deploy_guard.py
+          if ! ssh $SSH_OPTS "ubuntu@$HOST" "python3 - $REMOTE_DIR/data/itx.db" \
+                 < scripts/deploy_guard.py; then
+            echo "::error::임박한 폴 포인트 때문에 배포를 보류했다. 서버는 손대지 않았다 — 그 폴이 지난 뒤 이 워크플로를 Re-run 해라 (급하면 workflow_dispatch 의 force)"
+            exit 1
+          fi
 
       - name: 가드 무시 경고
         if: ${{ inputs.force }}
