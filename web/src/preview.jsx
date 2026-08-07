@@ -66,12 +66,41 @@ const SEATED_MATRIX = {
   },
 };
 
-const seatedMode = new URLSearchParams(location.search).get("state") === "seated";
+// `?state=long` — 정차역이 많은 노선. 393pt 안에 구간 열이 몇 개까지 들어가는지 보려면
+// 5개짜리 기본 픽스처로는 부족하다 (실기기에서 헤더가 뭉개진 것이 여기서 재현된다).
+// 좌석도 넉넉히 둬서 문서가 스크롤되게 만든다 — 고정 액션 바를 확인하려면 필요하다.
+// 실기기에서 깨진 그 노선이다 (IMG_8311). 구간 11개 + **네 글자 역**(`창원중앙`)이 함께 있다.
+const LONG_STOPS = [
+  "창원", "창원중앙", "진영", "밀양", "동대구", "대구", "구미", "김천", "영동", "대전", "천안", "수원",
+];
+const LONG_MATRIX = {
+  ...CANNED["/matrix"],
+  stops: LONG_STOPS,
+  board_at: "창원",
+  alight_at: "수원",
+  current_seg_idx: 1,
+  next_poll: { station: "창원중앙", offset_min: 10 },
+  seats: Array.from({ length: 12 }, (_, i) => ({
+    car: (i % 4) + 1,
+    seat_no: `${10 + i}${"ABCD"[i % 4]}`,
+    cells: LONG_STOPS.slice(0, -1).map((_, j) => (i + j) % 3 === 0),
+  })),
+  verdict: {
+    ...CANNED["/matrix"].verdict,
+    start_seg_idx: 1,
+    move_to: [rec(4, "12C", 1, 5, false)],
+    move_to_later: [rec(2, "17D", 4, 9, false)],
+  },
+};
+
+const mode = new URLSearchParams(location.search).get("state");
+const seatedMode = mode === "seated";
 
 window.fetch = async (url) => {
   const path = String(url).split("?")[0];
   const hit = Object.keys(CANNED).find((k) => path.endsWith(k));
-  const body = hit === "/matrix" && seatedMode ? SEATED_MATRIX : hit && CANNED[hit];
+  const matrix = seatedMode ? SEATED_MATRIX : mode === "long" ? LONG_MATRIX : CANNED["/matrix"];
+  const body = hit === "/matrix" ? matrix : hit && CANNED[hit];
   return {
     ok: !!hit,
     status: hit ? 200 : 404,
@@ -121,13 +150,21 @@ if (clicks.length) {
   setTimeout(tick, 200);
 }
 
+// `?scroll=<px>` — 프레임을 그만큼 내린 상태로 찍는다. 고정 요소(내비바 sticky ·
+// 액션 바 fixed)는 **스크롤해야 비로소 드러난다** — 맨 위에서는 흐름에 둔 것과 구분되지 않는다.
+const scrollY = Number(q.get("scroll") || 0);
+if (scrollY) {
+  setTimeout(() => document.querySelector(".frame")?.scrollTo(0, scrollY), 300);
+}
+
 // 뷰포트에 흔들리지 않게 393×852 프레임을 좌상단에 고정한다
 createRoot(document.getElementById("root")).render(
   <>
     <style>{skin.css}</style>
     {/* transform이 있으면 position:fixed가 뷰포트가 아니라 이 프레임을 기준으로 잡힌다 —
-        시트(설정·역 검색·지금 상태)를 실기기와 같은 위치로 보려면 이게 필요하다 */}
-    <style>{`html,body{margin:0;padding:0} .frame{width:393px;height:852px;overflow:hidden;position:absolute;top:0;left:0;transform:translateZ(0)} .frame > *{min-height:852px !important}`}</style>
+        시트(설정·역 검색·지금 상태)를 실기기와 같은 위치로 보려면 이게 필요하다.
+        `?scroll`을 주면 프레임 자체가 스크롤 컨테이너가 되어 sticky도 여기에 걸린다 */}
+    <style>{`html,body{margin:0;padding:0} .frame{width:393px;height:852px;overflow-x:hidden;overflow-y:${scrollY ? "auto" : "hidden"};position:absolute;top:0;left:0;transform:translateZ(0)} .frame > *{min-height:852px !important} .frame::-webkit-scrollbar{display:none}`}</style>
     <div className="frame">
       <Screen {...(PROPS[name] || {})} />
     </div>
