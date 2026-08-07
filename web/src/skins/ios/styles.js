@@ -149,7 +149,23 @@ export const st = {
   },
 
   // ── 내비게이션 바 44pt (설계 규칙) ──
-  navBar: { display: "flex", alignItems: "center", height: 44, padding: "0 16px", flex: "0 0 auto" },
+  // **상단에 고정하고 상태바까지 덮는다.** 흐름에 두면 같이 스크롤돼서, 내리다 보면
+  // 판정 문구가 시계·배터리 밑을 지나간다 (실기기에서 발견). 네이티브 iOS가 내비바를
+  // 상태바 아래로 밀어 넣고 블러를 씌우는 것이 바로 이것 때문이다.
+  //
+  // `screen`이 이미 `padding-top: env(safe-area-inset-top)`을 갖고 있어서, 그만큼
+  // 음수 마진으로 끌어올린 뒤 같은 값을 자기 패딩으로 되돌린다 — 다른 화면(로그인·부팅)의
+  // 세이프 에어리어는 건드리지 않고 내비바만 상태바까지 올라간다.
+  navBar: {
+    position: "sticky", top: 0, zIndex: 10, flex: "0 0 auto",
+    display: "flex", alignItems: "center",
+    height: "calc(44px + env(safe-area-inset-top))",
+    marginTop: "calc(-1 * env(safe-area-inset-top))",
+    padding: "env(safe-area-inset-top) 16px 0",
+    background: "rgba(242,242,247,.82)",
+    backdropFilter: "saturate(180%) blur(20px)",
+    WebkitBackdropFilter: "saturate(180%) blur(20px)",
+  },
   navTitle: { flex: 1, textAlign: "center", fontSize: 17, fontWeight: 700 },
   navAction: {
     minWidth: 64, border: "none", background: "none", color: tk.brandNavy,
