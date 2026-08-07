@@ -25,23 +25,31 @@ def build_segments(stops: list[str]) -> list[Segment]:
     ]
 
 
-def effective_start_idx(current_seg_idx: int, board_idx: int) -> int:
-    """실효 시작 = max(현재 구간, 탑승역) (D-18 인덱스 규칙).
+def effective_start_idx(sellable_seg_idx: int, board_idx: int) -> int:
+    """실효 시작 = max(팔 수 있는 첫 구간, 탑승역) (D-18 인덱스 규칙, D-47).
 
     모든 인덱스는 **전체 노선 `stops` 기준**이다. 탑승역 이전 구간은
     열차가 어디를 달리든 관심 밖.
+
+    첫 인자는 **열차의 현재 위치가 아니다.** 위치를 넣으면 이미 출발해 팔 수 없는 구간이
+    실효 시작이 되어 그 열 전체가 '판매됨'으로 채워진다 (이슈 #35 → D-47).
     """
-    return max(current_seg_idx, board_idx)
+    return max(sellable_seg_idx, board_idx)
 
 
-def query_range(current_seg_idx: int, board_idx: int, alight_idx: int) -> tuple[int, int]:
+def query_range(sellable_seg_idx: int, board_idx: int, alight_idx: int) -> tuple[int, int]:
     """실제로 조회할 구간 인덱스 범위 `[start, end)` (PLAN 5절 2, D-17).
 
     지나온 구간·탑승 전 구간은 판정·표시 모두에 불필요하므로 호출하지 않는다.
+
+    **`start == end`(빈 범위)도 정상 결과다** (→ D-47). 이용 구간의 마지막 구간을 달리는
+    중이면 팔 수 있는 구간이 하나도 남지 않는다. 예전처럼 `alight_idx - 1`로 되돌리면
+    바로 그 '팔 수 없는 구간'을 조회하게 되어 매진 오판이 되살아난다. 호출은 0회가 되고,
+    `build_verdict`가 이 상태를 `decision_needed=False`로 답한다.
     """
     if not (0 <= board_idx < alight_idx):
         raise ValueError(f"구간 인덱스가 올바르지 않다: board={board_idx}, alight={alight_idx}")
-    start = min(effective_start_idx(current_seg_idx, board_idx), alight_idx - 1)
+    start = min(effective_start_idx(sellable_seg_idx, board_idx), alight_idx)
     return start, alight_idx
 
 

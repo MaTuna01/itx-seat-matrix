@@ -1,4 +1,4 @@
-"""estimate_seg 경계 + 폴 포인터 전진 + grace 2분 (PLAN 13절, D-18/D-19)."""
+"""estimate_seg 경계 + 폴 포인터 전진 + grace 2분 (PLAN 13절, D-18/D-19/D-47)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from app.domain.models import StopInfo
 from app.domain.timeline import (
     TimelineConfig,
     compute_poll_points,
@@ -14,10 +15,12 @@ from app.domain.timeline import (
     is_ride_over,
     next_poll_hint,
     resolve_poll,
+    sellable_seg_idx,
 )
 from tests.conftest import STOPS, at, stop_infos
 
-# 시각표: 천안 08:00 / 평택 08:12 / 수원 08:26 / 안양 08:38 / 영등포 08:48 / 서울 08:56
+# 시각표: 천안 08:00/08:03 · 평택 08:12/08:15 · 수원 08:26/08:29 · 안양 08:38/08:41 ·
+#         영등포 08:48/08:51 · 서울 08:56(종착, 출발 없음)  — 도착/출발
 
 
 class TestEstimateSeg:
@@ -43,6 +46,53 @@ class TestEstimateSeg:
     def test_naive_datetime은_거부한다(self):
         with pytest.raises(ValueError):
             estimate_seg(stop_infos(), 0, datetime(2026, 8, 5, 8, 14))
+
+
+class TestSellableSegIdx:
+    """**팔 수 있는 첫 구간** — 조회·판정의 시작점 (→ D-47, 이슈 #35).
+
+    `estimate_seg`(위치)와 갈라지는 지점이 이 클래스의 전부다.
+    """
+
+    def test_정차_중에는_그_구간을_그대로_본다(self):
+        # 수원 도착 08:26, 출발 08:29. 정차 중에는 아직 수원→안양을 팔 수 있다
+        assert sellable_seg_idx(stop_infos(), 0, at(8, 27)) == 2
+        assert estimate_seg(stop_infos(), 0, at(8, 27)) == 2
+
+    def test_출발했으면_다음_구간으로_넘어간다(self):
+        # 08:30 = 수원 출발(08:29) 후. 열차는 수원-안양을 달리는 중이고
+        # 그 구간은 이미 팔 수 없다 → 판정은 안양→영등포부터
+        assert estimate_seg(stop_infos(), 0, at(8, 30)) == 2  # 위치는 그대로
+        assert sellable_seg_idx(stop_infos(), 0, at(8, 30)) == 3
+
+    def test_출발시각_정각은_아직_출발하지_않은_것으로_보지_않는다(self):
+        """경계는 `<=`다. 출발 시각에 이미 판매가 닫힌다고 보는 편이 안전하다."""
+        assert sellable_seg_idx(stop_infos(), 0, at(8, 29)) == 3
+
+    def test_운행_전에는_첫_구간(self):
+        assert sellable_seg_idx(stop_infos(), 0, at(7, 30)) == 0
+
+    def test_지연되면_판매_마감도_함께_밀린다(self):
+        # 10분 지연이면 실효 출발은 08:39 — 08:30에는 아직 수원에 서 있다
+        assert sellable_seg_idx(stop_infos(), 10, at(8, 30)) == 2
+        assert sellable_seg_idx(stop_infos(), 0, at(8, 30)) == 3
+
+    def test_종착_이후에도_마지막_구간을_넘지_않는다(self):
+        assert sellable_seg_idx(stop_infos(), 0, at(9, 30)) == len(STOPS) - 2
+
+    def test_출발시각이_없으면_도착시각으로_떨어진다(self):
+        """캐시가 부실할 때의 방어. 늦게 판단하면 원래 버그로 돌아간다."""
+        stops = [StopInfo(name=s.name, arrival=s.arrival) for s in stop_infos()]
+        assert sellable_seg_idx(stops, 0, at(8, 27)) == 3  # 수원 도착 08:26 → 이미 넘어감
+
+    def test_GPS_보정값도_같은_규칙을_거친다(self):
+        """GPS는 주행 중 구간을 정확히 짚는다 — 그대로 조회에 쓰면 버그를 더 확실히 밟는다."""
+        # 시각표상 08:30은 수원 출발 후지만, GPS가 아직 평택-수원이라고 말한다
+        assert sellable_seg_idx(stop_infos(), 0, at(8, 30), position_idx=1) == 2
+
+    def test_naive_datetime은_거부한다(self):
+        with pytest.raises(ValueError):
+            sellable_seg_idx(stop_infos(), 0, datetime(2026, 8, 5, 8, 30))
 
 
 class TestPollPoints:

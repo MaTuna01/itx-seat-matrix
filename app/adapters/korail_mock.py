@@ -28,13 +28,18 @@ TRAIN_NO = "1004"  # 프로토타입 목업과 1:1인 기준 편성
 TRAIN_NAME = "ITX-마음"
 
 # 정차역 + 시각표 도착시각(첫 역 출발 기준 분 오프셋). 전 편성이 같은 노선을 달린다.
-STOPS: tuple[tuple[str, int], ...] = (
-    ("천안", 0),
-    ("평택", 12),
-    ("수원", 26),
-    ("안양", 38),
-    ("영등포", 48),
-    ("서울", 56),
+# (역명, 도착 오프셋(분), 출발 오프셋(분) — 종착역은 None)
+#
+# **정차 시간을 담는 것이 목업의 의무다** (→ D-47). 도착과 출발이 같으면 "정차 중"과
+# "주행 중"을 가를 수 없고, 그러면 목업이 이슈 #35의 구간(출발한 구간은 팔 수 없다)을
+# 통째로 가린다. Phase 1이 목업만으로 관통했던 이유가 그런 은폐였다 (D-31/D-32와 같은 종류).
+STOPS: tuple[tuple[str, int, int | None], ...] = (
+    ("천안", 0, 3),
+    ("평택", 12, 15),
+    ("수원", 26, 29),
+    ("안양", 38, 41),
+    ("영등포", 48, 51),
+    ("서울", 56, None),
 )
 
 # (열차번호, 열차명, 첫 역 출발시각, 좌석표 회전량)
@@ -77,7 +82,7 @@ class MockKorailAdapter:
 
     # ── KorailPort ──────────────────────────────────────────────────
     async def list_stations(self) -> list[StationInfo]:
-        return [StationInfo(name=name) for name, _ in STOPS]
+        return [StationInfo(name=name) for name, *_ in STOPS]
 
     async def search_trains(
         self,
@@ -146,8 +151,12 @@ class MockKorailAdapter:
     def _stops(self, train_no: str, d: _date) -> list[StopInfo]:
         base = datetime.combine(d, self._train(train_no)[2], tzinfo=KST)
         return [
-            StopInfo(name=name, arrival=base + timedelta(minutes=offset))
-            for name, offset in STOPS
+            StopInfo(
+                name=name,
+                arrival=base + timedelta(minutes=arr),
+                departure=None if dep is None else base + timedelta(minutes=dep),
+            )
+            for name, arr, dep in STOPS
         ]
 
     @staticmethod
@@ -159,7 +168,7 @@ class MockKorailAdapter:
         return cells[k:] + cells[:k]
 
     def _segment_idx(self, frm: str, to: str) -> int:
-        names = [name for name, _ in STOPS]
+        names = [name for name, *_ in STOPS]
         try:
             i, j = names.index(frm), names.index(to)
         except ValueError as exc:  # pragma: no cover - 목업에 없는 역

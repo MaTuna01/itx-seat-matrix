@@ -49,9 +49,9 @@ from app.domain.timeline import (
     DEFAULT_TIMELINE,
     TimelineConfig,
     compute_poll_points,
-    estimate_seg,
     is_ride_over,
     resolve_poll,
+    sellable_seg_idx,
 )
 from app.domain.verdict import build_verdict
 from app.storage.creds import load_korail_cred
@@ -186,9 +186,11 @@ async def _run_one(
         return
 
     # ── C. 폴링 사이클 ───────────────────────────────────────────────
-    # 위치는 시각표+지연 추정만 쓴다. GPS는 화면 전용이다 (D-13)
-    current_seg_idx = estimate_seg(stops, delay, now)
-    start_idx, end_idx = query_range(current_seg_idx, board_idx, alight_idx)
+    # 위치는 시각표+지연 추정만 쓴다. GPS는 화면 전용이다 (D-13).
+    # 조회·판정의 시작은 위치가 아니라 **팔 수 있는 첫 구간**이다 — 출발한 구간을 조회하면
+    # 빈 응답이 오고 그것이 '전 좌석 판매됨'으로 읽혀 판정이 뒤집힌다 (이슈 #35 → D-47)
+    sellable_idx = sellable_seg_idx(stops, delay, now)
+    start_idx, end_idx = query_range(sellable_idx, board_idx, alight_idx)
     try:
         matrix = await fetch_matrix(
             deps.port,
@@ -221,7 +223,7 @@ async def _run_one(
         status=status,
         board_idx=board_idx,
         alight_idx=alight_idx,
-        current_seg_idx=current_seg_idx,
+        sellable_seg_idx=sellable_idx,
         my_car=my_car,
         my_seat_no=my_seat_no,
     )
