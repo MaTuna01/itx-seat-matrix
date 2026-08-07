@@ -7,6 +7,7 @@
 // CI에는 아직 붙어 있지 않다 (test 잡이 파이썬 전용). 붙이는 것은 별도 판단이다.
 
 import { summarize, buildRows, failureSummary } from "../src/core/format.js";
+import { skinForDevice } from "../src/core/skin.js";
 
 const stops = ["수원", "안양", "영등포", "용산", "청량리"];
 const txt = (segs) => segs.map((s) => s.t).join("");
@@ -93,6 +94,24 @@ eq("입석이면 고정 없음", r.myPinned, false);
 eq("입석 1행 = 가장 오래 앉는 좌석", r.rows[0].key, "4-12C");
 r = buildRows({ seats, startIdx: 0, alightIdx: 4, seated: true, myCar: 3, myKey: "3-없음", onlyClear: false });
 eq("내 좌석이 매트릭스에 없으면 조용히 통과 (D-18)", r.myPinned, false);
+
+// 8. 스킨 판별 (D-50) — 기준은 "iOS 기기냐 아니냐"다. 맥이냐 아니냐가 아니다.
+const UA = {
+  winChrome: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  mac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+  linux: "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+  android: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+  iphone: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  iphonePwa: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+};
+eq("윈도우 크롬 → web", skinForDevice(UA.winChrome, 0), "web");
+eq("터치 윈도우 노트북 → web (오검출 방지)", skinForDevice(UA.winChrome, 10), "web");
+eq("맥 → web", skinForDevice(UA.mac, 0), "web");
+eq("리눅스 → web", skinForDevice(UA.linux, 0), "web");
+eq("안드로이드 폰 → web (480px가 곧 폰 폭이다)", skinForDevice(UA.android, 5), "web");
+eq("아이폰 → ios", skinForDevice(UA.iphone, 5), "ios");
+eq("아이폰 홈화면 PWA → ios", skinForDevice(UA.iphonePwa, 5), "ios");
+eq("아이패드(맥 UA 위장) → ios", skinForDevice(UA.mac, 5), "ios");
 
 console.log(fail === 0 ? "\n전부 통과" : `\n${fail}건 실패`);
 process.exit(fail === 0 ? 0 : 1);
