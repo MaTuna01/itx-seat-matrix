@@ -21,7 +21,19 @@ const Segs = ({ parts }) =>
 // 구간에 넘긴다 — 한 열이 더 보인다. 38 = 세 글자 역 이름이 11pt로 들어가는 폭.
 const SEAT_COL = 112;
 const SEAT_COL_NARROW = 72;
-const SEG_MIN = 38;
+const SEG_MIN = 40;
+
+// `창원중앙`처럼 네 글자가 넘는 역은 한 열에 안 들어간다. 중간에서 접어 두 줄로 만든다 —
+// CSS 줄바꿈에 맡기면 폭이 닿는 데서 끊겨 `창원중`/`앙`이 되고, 그건 읽히지 않는다.
+// 열 폭을 역 이름에 맞춰 넓히는 쪽은 구간이 11개인 노선(창원→수원)에서 가로 스크롤이 배가 된다.
+const wrapStop = (name) => {
+  if (name.length <= 3) return [name];
+  const half = Math.ceil(name.length / 2);
+  return [name.slice(0, half), name.slice(half)];
+};
+
+const StopLabel = ({ name }) =>
+  wrapStop(name).map((line, i) => <div key={i}>{line}</div>);
 // iOS 스킨은 393pt에 갇혀 있고 body 좌우 여백이 16씩이다 (styles.js `screen`·`body`)
 const BODY_W = 393 - 32;
 
@@ -144,6 +156,8 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   const seatCol = hasTag ? SEAT_COL : SEAT_COL_NARROW;
   const tableW = seatCol + segments.length * SEG_MIN;
   const scrolls = tableW > BODY_W;
+  // 역당 폭이 이름 하나를 못 담는 지점. 7개까지는 51pt씩 돌아가 세 글자가 들어간다
+  const crowdedRoute = alightIdx - boardIdx + 1 > 7;
 
   // 판정 문구 일체 — 문장은 core가 만든다 (→ D-50)
   const summary = summarize({ verdict, data, stops, startIdx });
@@ -180,11 +194,17 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           </span>
         </div>
 
-        {/* 노선 진행바 — 매트릭스와 같은 범위(내 구간)만 그린다 (→ D-31) */}
+        {/* 노선 진행바 — 매트릭스와 같은 범위(내 구간)만 그린다 (→ D-31).
+            정차역이 많으면 이름이 서로 겹친다(창원→수원은 12개, 역당 30pt) — 30pt에
+            네 글자를 넣을 방법은 없으므로 **이름을 고른다.** 점은 전부 남으니
+            어디까지 왔는지는 그대로 읽히고, 구간별 상세는 아래 매트릭스가 말한다. */}
         <div style={st.routeBar}>
           {stops.slice(boardIdx, alightIdx + 1).map((name, offset) => {
             const i = boardIdx + offset;
             const passed = i <= posIdx;
+            // 출발 · 하차 · 지금 향하는 역만 남긴다
+            const named =
+              !crowdedRoute || i === boardIdx || i === alightIdx || i === posIdx + 1;
             return (
               <div key={name} style={st.routeStop}>
                 <div style={st.routeLineWrap}>
@@ -203,7 +223,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                   fontWeight: i === posIdx + 1 ? 700 : 400,
                   color: i === posIdx + 1 ? tk.brandNavy : tk.textMuted,
                 }}>
-                  {name}
+                  {named ? name : ""}
                 </span>
               </div>
             );
@@ -301,9 +321,9 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                     </th>
                     {segments.map((seg) => (
                       <th key={seg.idx} style={{ ...st.thSeg, opacity: seg.idx < startIdx ? 0.35 : 1 }}>
-                        <div>{seg.from}</div>
+                        <StopLabel name={seg.from} />
                         <div>{failedSegs.has(seg.idx) ? "?" : "↓"}</div>
-                        <div>{seg.to}</div>
+                        <StopLabel name={seg.to} />
                       </th>
                     ))}
                   </tr>

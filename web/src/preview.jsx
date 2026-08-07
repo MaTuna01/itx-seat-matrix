@@ -69,22 +69,27 @@ const SEATED_MATRIX = {
 // `?state=long` — 정차역이 많은 노선. 393pt 안에 구간 열이 몇 개까지 들어가는지 보려면
 // 5개짜리 기본 픽스처로는 부족하다 (실기기에서 헤더가 뭉개진 것이 여기서 재현된다).
 // 좌석도 넉넉히 둬서 문서가 스크롤되게 만든다 — 고정 액션 바를 확인하려면 필요하다.
-const LONG_STOPS = ["수원", "안양", "광명", "영등포", "용산", "서울", "청량리", "덕소", "양평"];
+// 실기기에서 깨진 그 노선이다 (IMG_8311). 구간 11개 + **네 글자 역**(`창원중앙`)이 함께 있다.
+const LONG_STOPS = [
+  "창원", "창원중앙", "진영", "밀양", "동대구", "대구", "구미", "김천", "영동", "대전", "천안", "수원",
+];
 const LONG_MATRIX = {
   ...CANNED["/matrix"],
   stops: LONG_STOPS,
-  alight_at: "양평",
+  board_at: "창원",
+  alight_at: "수원",
   current_seg_idx: 1,
-  seats: Array.from({ length: 9 }, (_, i) => ({
+  next_poll: { station: "창원중앙", offset_min: 10 },
+  seats: Array.from({ length: 12 }, (_, i) => ({
     car: (i % 4) + 1,
-    seat_no: `${i + 1}${"ABCD"[i % 4]}`,
+    seat_no: `${10 + i}${"ABCD"[i % 4]}`,
     cells: LONG_STOPS.slice(0, -1).map((_, j) => (i + j) % 3 === 0),
   })),
   verdict: {
     ...CANNED["/matrix"].verdict,
     start_seg_idx: 1,
-    move_to: [rec(4, "12C", 1, 8, true)],
-    move_to_later: [rec(1, "2B", 3, 8, true)],
+    move_to: [rec(4, "12C", 1, 5, false)],
+    move_to_later: [rec(2, "17D", 4, 9, false)],
   },
 };
 
