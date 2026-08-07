@@ -135,8 +135,14 @@ def build_verdict(
         if s.clear_until_idx > start_idx
     ][: config.max_recommendations]
 
-    # 내 자리를 포함해 남은 구간에 앉을 수 있는 좌석이 하나도 없으면 환승 판단이 필요하다
-    all_sold = all(s.clear_until_idx <= start_idx for s in enriched)
+    # 내 자리를 포함해 남은 구간 [start, alight)에 **빈 셀이 하나도 없을 때만** 매진이다.
+    #
+    # `clear_until` 기준으로 판단하면 안 된다. 그 값은 시작 구간부터 **연속으로** 빈 구간만
+    # 세므로, 시작 구간이 팔려 있으면 뒤가 아무리 비어 있어도 start_idx를 그대로 돌려준다.
+    # 그러면 "시작 구간 매진"이 "남은 전 구간 매진"으로 뒤집히고, 화면은 환승을 권하고
+    # ALL_SOLD 푸시가 나간다 — 정작 몇 정거장 뒤부터는 앉아서 갈 수 있는데도.
+    # 퇴근길(영등포→천안, 영등포-수원만 매진)에서 실제로 겪었다 (→ D-45).
+    all_sold = all(all(seat.cells[start_idx:alight_idx]) for seat in enriched)
 
     my_seat_status = None
     my_seat_sold_from = None

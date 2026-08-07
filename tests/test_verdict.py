@@ -187,3 +187,56 @@ def test_내_자리가_남아있으면_매진이_아니다():
     )
     assert v.all_sold_after_current is False
     assert v.move_to == []  # 옮길 곳은 없지만 옮길 필요도 없다
+
+
+class Test시작_구간만_매진일_때:
+    """퇴근길(영등포→천안)에서 실제로 겪은 케이스 (→ D-45).
+
+    탑승 구간만 매진이고 그 이후는 비어 있다. 이때 모든 좌석의 `clear_until`은
+    `start_idx`를 그대로 돌려주지만 **매진이 아니다** — 몇 정거장 뒤부터 앉아서 갈 수 있다.
+    `clear_until` 기준으로 매진을 판정하면 화면이 환승을 권하고 ALL_SOLD 푸시가 나간다.
+
+    **이 방향을 덮는 테스트가 하나도 없어서 버그가 살아남았다.** 목업 노선은 출근길
+    방향이라 여기서는 실제 퇴근길 노선을 픽스처로 쓴다 (원칙 1의 예외 = 테스트 픽스처).
+    """
+
+    # 구간 0 = 영등포-수원 / 1 = 수원-평택 / 2 = 평택-천안
+    RETURN_STOPS = ["영등포", "수원", "평택", "천안"]
+
+    def _verdict(self, seats: dict[str, list[bool]], *, current_seg_idx: int = 0):
+        return build_verdict(
+            matrix=make_matrix(seats, stops=self.RETURN_STOPS),
+            status=STANDING,
+            board_idx=0,
+            alight_idx=3,
+            current_seg_idx=current_seg_idx,
+        )
+
+    def test_뒤_구간이_비어있으면_전_구간_매진이_아니다(self):
+        # 4-1A는 수원부터 천안까지 계속 빈다 → 환승을 권할 상황이 아니다
+        v = self._verdict({"4-1A": [T, F, F], "4-1B": [T, T, F], "5-2A": [T, T, T]})
+        assert v.all_sold_after_current is False
+
+    def test_한_좌석의_마지막_구간만_비어도_매진이_아니다(self):
+        v = self._verdict({"4-1A": [T, T, F], "5-2A": [T, T, T]})
+        assert v.all_sold_after_current is False
+
+    def test_남은_전_구간_전_좌석_매진이면_True(self):
+        v = self._verdict({"4-1A": [T, T, T], "5-2A": [T, T, T]})
+        assert v.all_sold_after_current is True
+
+    def test_지나온_구간의_빈자리는_매진_판정을_바꾸지_않는다(self):
+        # 실효 시작 = 수원(1). 그 이전 영등포-수원이 비어 있어도 남은 구간이 전부 팔렸다
+        v = self._verdict({"4-1A": [F, T, T], "5-2A": [F, T, T]}, current_seg_idx=1)
+        assert v.all_sold_after_current is True
+
+    def test_추천은_아직_비어_있다(self):
+        """현재 동작을 못 박아둔다 — 지연 착석 추천(별도 이슈)이 들어오면 여기가 바뀐다.
+
+        추천 대상은 `clear_until_idx > start_idx`로 제한돼 있어 "지금 당장" 앉을 수 있는
+        좌석만 나온다. 매진 판정과 달리 이쪽은 **설계 공백**이라 임의로 바꾸지 않는다.
+        """
+        v = self._verdict({"4-1A": [T, F, F], "5-2A": [T, T, T]})
+        assert v.move_to == []
+        # 다만 매진은 아니므로 화면은 "일부 구간만 착석 가능"으로 떨어진다
+        assert v.all_sold_after_current is False
