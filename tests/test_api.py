@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -21,7 +21,12 @@ from tests.conftest import enable_signup, stop_infos
 
 # 목업 열차는 운행일 08:00~08:56에 달린다. 내일 날짜를 쓰면 "운행 전"이 확정돼
 # 현재 구간이 시계와 무관하게 0이 된다 (테스트 결정성)
-RIDE_DATE = (date.today() + timedelta(days=1)).isoformat()
+#
+# ★ **반드시 KST 기준 "내일"이어야 한다** (절대규칙 1). `date.today()`는 naive·로컬 TZ라
+# UTC 러너에서 KST보다 하루 뒤처지고, 그러면 "내일"이 **이미 출발한 오늘**이 된다 —
+# `current_seg_idx`가 0이 아니게 되고 첫 폴 포인트도 지나 있어 세 테스트가 깨졌다.
+# KST 00:00~09:00(= UTC 15:00~24:00)에만 나타나서 로컬에서는 거의 안 보인다 (→ D-44 CI가 잡았다).
+RIDE_DATE = (datetime.now(KST).date() + timedelta(days=1)).isoformat()
 
 
 def make_subscription(client, **overrides) -> dict:
