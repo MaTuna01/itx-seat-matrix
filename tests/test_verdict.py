@@ -165,6 +165,31 @@ class TestEffectiveStart:
         assert v.start_seg_idx == 3
         assert v.my_seat_status == "CLEAR_ALL"
 
+    def test_마지막_구간을_달리는_중이면_판정하지_않는다(self):
+        """★ 회귀 방어 (→ D-47). 팔 수 있는 구간이 없으면 조회도 판정도 성립하지 않는다.
+
+        `all_sold_after_current`가 특히 위험하다 — 매트릭스가 비어 있으므로 매진 판정식이
+        `all([])`로 **공허하게 참**이 되고, 하차 직전에 "지하철 환승 고려" 푸시가 나간다.
+        """
+        matrix = make_matrix({}, queried_from_idx=5, queried_to_idx=5)
+        v = build_verdict(
+            matrix=matrix, status=SEATED, board_idx=0, alight_idx=5,
+            sellable_seg_idx=5, my_car=3, my_seat_no="7A",
+        )
+        assert v.decision_needed is False
+        assert v.all_sold_after_current is False, "빈 매트릭스가 매진으로 뒤집혔다"
+        assert v.move_to == [] and v.move_to_later == []
+        assert v.start_seg_idx == 5
+
+    def test_하차역_직전_구간은_평소대로_판정한다(self):
+        matrix = make_matrix({"3-7A": [T, T, T, T, F]})
+        v = build_verdict(
+            matrix=matrix, status=SEATED, board_idx=0, alight_idx=5,
+            sellable_seg_idx=4, my_car=3, my_seat_no="7A",
+        )
+        assert v.decision_needed is True
+        assert v.my_seat_status == "CLEAR_ALL"
+
     def test_지나온_구간_추천은_하지_않는다(self):
         matrix = make_matrix({"4-1B": [F, F, T, T, T], "3-7A": [T, T, T, T, T]})
         v = build_verdict(

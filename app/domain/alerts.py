@@ -152,8 +152,15 @@ def evaluate(
     - 해시가 같으면 해시 기반 종류는 침묵한다 (원칙 6: 동일 상태 중복 발송 금지)
     - `SEAT_EXTENDED`는 해시와 무관하게 셀 전이로만 발화한다
     - 여러 종류가 동시 성립하면 **우선순위 합성으로 1건**
+    - 판단할 것이 없으면(`decision_needed=False`) **베이스라인까지 포함해 전부 침묵**한다
     """
     cur_hash = verdict_hash(verdict)
+    if not verdict.decision_needed:
+        # 이용 구간의 마지막 구간을 달리는 중이다 (→ D-47). 취할 행동이 없는 시점에
+        # 나가는 알림은 전부 오발송이다 — 생존 확인용 베이스라인(D-20)도 예외가 아니다.
+        # 해시는 기록한다: 다음 조회가 이 상태를 "변화"로 오해하지 않게 해야 한다
+        return AlertDecision(alert=None, verdict_hash=cur_hash, cells_snapshot=my_seat_cells)
+
     start_idx = verdict.start_seg_idx
     baseline = prev_hash is None
     changed = prev_hash != cur_hash

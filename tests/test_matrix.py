@@ -45,8 +45,17 @@ class TestQueryRange:
         assert query_range(sellable_seg_idx=1, board_idx=0, alight_idx=5) == (1, 5)
         assert query_range(sellable_seg_idx=0, board_idx=2, alight_idx=4) == (2, 4)
 
-    def test_열차가_하차역에_거의_다다랐으면_마지막_한_구간(self):
-        assert query_range(sellable_seg_idx=9, board_idx=0, alight_idx=5) == (4, 5)
+    def test_마지막_구간을_달리는_중이면_조회할_구간이_없다(self):
+        """빈 범위가 정상 결과다 (→ D-47).
+
+        하차역 앞으로 되돌리면 **이미 출발해 팔 수 없는 구간**을 조회하게 되어
+        매진 오판이 되살아난다. 호출 0회가 맞다.
+        """
+        assert query_range(sellable_seg_idx=5, board_idx=0, alight_idx=5) == (5, 5)
+        assert query_range(sellable_seg_idx=9, board_idx=0, alight_idx=5) == (5, 5)
+
+    def test_하차역_직전_구간은_아직_조회한다(self):
+        assert query_range(sellable_seg_idx=4, board_idx=0, alight_idx=5) == (4, 5)
 
     def test_잘못된_구간은_거부(self):
         with pytest.raises(ValueError):

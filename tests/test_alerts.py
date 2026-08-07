@@ -362,3 +362,31 @@ def test_전량_매진이면_여전히_ALL_SOLD다():
         prev_cells=None, prev_hash="something-else",
     )
     assert decision.alert.kind is AlertKind.ALL_SOLD
+
+
+# ── 판단할 것이 없을 때는 베이스라인까지 침묵한다 (→ D-47) ────────────
+def test_마지막_구간을_달리는_중에는_알림이_나가지_않는다():
+    """★ 회귀 방어. 팔 수 있는 구간이 없으면 취할 행동도 없다 (→ D-47).
+
+    특히 **베이스라인(D-20)도 예외가 아니다** — 첫 폴링이 하필 이 시점이면
+    "잔여 좌석 없음 · 지하철 환승 고려"가 하차 직전에 나간다. 생존 확인이라는
+    베이스라인의 목적이 오히려 오정보를 만드는 유일한 구간이다.
+    """
+    v = build_verdict(
+        matrix=make_matrix({}, queried_from_idx=5, queried_to_idx=5),
+        status=SEATED,
+        board_idx=0,
+        alight_idx=5,
+        sellable_seg_idx=5,
+        my_car=MY_CAR,
+        my_seat_no=MY_SEAT,
+    )
+    assert v.decision_needed is False
+
+    for prev_hash in (None, "something-else"):
+        decision = evaluate(
+            verdict=v, ctx=ctx(), my_seat_cells=None,
+            prev_cells=[F, F, F, F, F], prev_hash=prev_hash,
+        )
+        assert decision.alert is None, f"판단할 것이 없는데 알림이 나갔다 (prev_hash={prev_hash})"
+        assert decision.verdict_hash, "해시는 기록해야 다음 조회가 변화로 오해하지 않는다"

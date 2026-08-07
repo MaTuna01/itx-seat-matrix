@@ -173,7 +173,23 @@ def build_verdict(
     팔지 않아 빈 응답이 오고, 그것이 '전 좌석 판매됨'으로 읽혀 판정이 뒤집힌다 (이슈 #35).
     `timeline.sellable_seg_idx()`가 그 값을 만든다.
     """
-    start_idx = min(effective_start_idx(sellable_seg_idx, board_idx), alight_idx - 1)
+    raw_start = effective_start_idx(sellable_seg_idx, board_idx)
+    if raw_start >= alight_idx:
+        # 이용 구간의 마지막 구간을 달리는 중 — 팔 수 있는 구간이 하나도 없다 (→ D-47).
+        # 여기서 하차역 앞으로 되돌리면(예전 `alight_idx - 1` 클램프) 바로 그 '팔 수 없는
+        # 구간'을 판정 대상으로 삼게 되어 매진 오판이 되살아난다.
+        #
+        # `all_sold_after_current`는 **False**여야 한다. 조회 범위가 비어 매트릭스도
+        # 비는데, 그 상태로 매진 판정식을 돌리면 `all([])`이 공허하게 참이 되어
+        # ALL_SOLD("지하철 환승 고려")가 하차 직전에 발사된다.
+        return Verdict(
+            sub_status=status,
+            decision_needed=False,
+            all_sold_after_current=False,
+            start_seg_idx=alight_idx,
+        )
+
+    start_idx = raw_start
     stops = matrix.stops
     enriched = enrich_seats(matrix.seats, start_idx, alight_idx)
 

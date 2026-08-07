@@ -212,7 +212,16 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
 
       {/* ── 판정 카드 (상태별 분기, D-15/D-16) ── */}
       <section style={st.verdict}>
-        {seated ? (
+        {verdict.decision_needed === false ? (
+          // 이용 구간의 마지막 구간을 달리는 중 — 팔 수 있는 구간이 없어 조회도 하지 않는다.
+          // 여기서 빈 매트릭스를 그대로 그리면 "전부 매진"으로 읽힌다 (→ D-47)
+          <>
+            <div style={st.verdictLine}>
+              <span style={{ color: "#0e7a4a", fontWeight: 700 }}>곧 {data.alight_at} 도착</span>
+            </div>
+            <p style={st.verdictSub}>이동 판단 불필요 · 남은 구간에 살 수 있는 좌석이 없습니다</p>
+          </>
+        ) : seated ? (
           <>
             <div style={st.verdictLine}>
               <span style={st.seatChip}>내 자리 {data.my_car}호차 {data.my_seat_no}</span>
@@ -293,7 +302,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
 
         {/* 지연 착석 목록 — 지금 앉을 수 있는 좌석과 **분리해서** 보여준다 (D-46).
             섞으면 "지금 앉을 수 있는 자리"인지 구분이 사라진다. */}
-        {laterList.length > 0 && !verdict.all_sold_after_current && (
+        {laterList.length > 0 && !verdict.all_sold_after_current && verdict.decision_needed !== false && (
           <p style={st.verdictSub}>
             {verdict.move_to.length > 0 ? "지금은 아니지만 뒤 구간에 빈 자리" : "빈 자리"}:{" "}
             {laterList.map((r) => `${r.car}-${r.seat_no}(${seatRange(r)})`).join(", ")}
@@ -307,7 +316,11 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
         {error && <p style={{ ...st.nextPoll, color: "#c0392b" }}>갱신 실패: {error}</p>}
       </section>
 
-      {/* ── 필터 + 수동 갱신 ── */}
+      {/* ── 필터 + 수동 갱신 + 매트릭스 ── */}
+      {/* 판단할 것이 없으면 아무것도 그리지 않는다 — 조회 자체를 하지 않아 좌석이 0개다.
+          빈 표를 그리면 "실제로 조회해 보니 전부 매진"으로 읽힌다 (→ D-47) */}
+      {verdict.decision_needed !== false && (
+      <>
       <div style={st.filterRow}>
         <button
           onClick={() => setOnlyClear(!onlyClear)}
@@ -379,6 +392,9 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           </tbody>
         </table>
       </div>
+
+      </>
+      )}
 
       {/* ── 좌석 선택 액션 바 (D-15 전이 입력) ── */}
       {selectedSeat && selectedSeat.key !== myKey && (

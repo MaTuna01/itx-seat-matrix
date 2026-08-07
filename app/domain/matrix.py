@@ -41,10 +41,15 @@ def query_range(sellable_seg_idx: int, board_idx: int, alight_idx: int) -> tuple
     """실제로 조회할 구간 인덱스 범위 `[start, end)` (PLAN 5절 2, D-17).
 
     지나온 구간·탑승 전 구간은 판정·표시 모두에 불필요하므로 호출하지 않는다.
+
+    **`start == end`(빈 범위)도 정상 결과다** (→ D-47). 이용 구간의 마지막 구간을 달리는
+    중이면 팔 수 있는 구간이 하나도 남지 않는다. 예전처럼 `alight_idx - 1`로 되돌리면
+    바로 그 '팔 수 없는 구간'을 조회하게 되어 매진 오판이 되살아난다. 호출은 0회가 되고,
+    `build_verdict`가 이 상태를 `decision_needed=False`로 답한다.
     """
     if not (0 <= board_idx < alight_idx):
         raise ValueError(f"구간 인덱스가 올바르지 않다: board={board_idx}, alight={alight_idx}")
-    start = min(effective_start_idx(sellable_seg_idx, board_idx), alight_idx - 1)
+    start = min(effective_start_idx(sellable_seg_idx, board_idx), alight_idx)
     return start, alight_idx
 
 

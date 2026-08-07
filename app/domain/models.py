@@ -181,6 +181,10 @@ class Verdict(BaseModel):
     # move_to는 비고 이쪽만 찬다.
     move_to_later: list[SeatRecommendation] = Field(default_factory=list)
     all_sold_after_current: bool = False
+    # 아직 판단할 것이 남았는가 (→ D-47). 이용 구간의 **마지막 구간을 달리는 중**이면
+    # 팔 수 있는 구간이 없어 조회도 판정도 성립하지 않는다. 이때 `all_sold_after_current`를
+    # 그대로 두면 `all([])`이 공허하게 참이 되어 ALL_SOLD가 발사된다 — 반드시 분기한다.
+    decision_needed: bool = True
     # 판정·조회의 **시작 구간** = max(팔 수 있는 첫 구간, 탑승역) (D-18, D-47).
     # `/matrix` 응답 최상위의 `current_seg_idx`(열차 위치)와 **다른 값**이다 —
     # 열차가 주행 중이면 이 값이 한 구간 앞선다. 둘을 같은 이름으로 둔 것이 이슈 #35였다.
