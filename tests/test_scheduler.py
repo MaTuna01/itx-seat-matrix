@@ -400,11 +400,10 @@ async def test_조회_범위는_실효_시작부터_하차역까지다(db):
     deps = deps_for(db, port, spy)
     make_sub(db, status="STANDING", board_at="평택", alight_at="영등포")
 
-    # 08:16 = 평택(08:12) 통과 후 → 실효 시작은 구간 1(평택→수원)
+    # 08:16 = 평택 **출발**(08:15) 후. 열차는 평택-수원을 달리는 중이고 그 구간은
+    # 이미 팔 수 없다 → 실효 시작은 구간 2(수원→안양)다 (→ D-47)
     await run_tick(deps, now=SUWON_POINT_10)
-    assert sorted(port.seat_map_calls) == sorted(
-        [("평택", "수원"), ("수원", "안양"), ("안양", "영등포")]
-    )
+    assert sorted(port.seat_map_calls) == sorted([("수원", "안양"), ("안양", "영등포")])
 
 
 # ── ★ 이미 출발한 구간은 조회하지 않는다 (이슈 #35 → D-47) ────────────
@@ -443,6 +442,7 @@ async def test_출발한_구간은_조회하지_않는다(db):
     # ② 08:03 출발. 코레일은 이 시점부터 천안→평택에 열차를 주지 않는다
     port.empty_segments = {0}
     port.seat_map_calls.clear()
+    spy.notes.clear()
 
     # ③ 08:08 — 평택 도착 4분 전 폴링. 열차는 천안-평택을 달리는 중이다
     await run_tick(deps, now=at(8, 8))
@@ -579,17 +579,18 @@ async def test_내_좌석_스냅샷이_기록되고_전이가_감지된다(db):
 
     await run_tick(deps, now=SUWON_POINT_10)
     snapshot = json.loads(row_of(db, sub_id)["last_cells_snapshot"])
-    # 지나온 구간(0)은 조회하지 않아 UNQUERIED_CELL(True)로 채워져 있다 (D-18/D-31).
+    # 조회하지 않은 구간은 UNQUERIED_CELL(True)로 채워져 있다 (D-18/D-31) — 지나온 구간(0)
+    # 뿐 아니라 **지금 달리는 중이라 팔 수 없는 구간(1)** 도 여기 들어간다 (→ D-47).
     # 전이 판정 범위가 [실효 시작, 하차역)이라 이 채움값은 비교에 들어오지 않는다 —
     # 실효 시작은 시간이 갈수록 커지므로 두 스냅샷 모두 그 구간에선 실관측값이다
-    assert snapshot[1:] == [False, True, True, True]
+    assert snapshot[2:] == [True, True, True]
     spy.notes.clear()
 
     # 누가 취소해 잔여 구간의 판매가 풀렸다 → true→false 전이
     port.cells = cells(**{"3_7A": [F, F, F, F, F]})
     await run_tick(deps, now=SUWON_POINT_4)
     assert spy.kinds == ["SEAT_EXTENDED"], f"셀 전이를 놓쳤다: {spy.kinds}"
-    assert json.loads(row_of(db, sub_id)["last_cells_snapshot"])[1:] == [F, F, F, F]
+    assert json.loads(row_of(db, sub_id)["last_cells_snapshot"])[2:] == [F, F, F]
 
 
 async def test_열차_진행만으로는_연장_알림이_나가지_않는다(db):

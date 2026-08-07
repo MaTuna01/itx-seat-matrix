@@ -100,7 +100,7 @@ def verdict_hash(verdict: Verdict) -> str:
     # 좌석이 같아도 "언제부터"가 당겨지면 사용자에게는 다른 정보다
     later_top = f"{later.key}@{later.clear_from_idx}" if later else None
     if verdict.sub_status is SubscriptionStatus.STANDING:
-        payload = [verdict.current_seg_idx, top, later_top, verdict.all_sold_after_current]
+        payload = [verdict.start_seg_idx, top, later_top, verdict.all_sold_after_current]
     else:
         payload = [
             verdict.my_seat_status,
@@ -154,7 +154,7 @@ def evaluate(
     - 여러 종류가 동시 성립하면 **우선순위 합성으로 1건**
     """
     cur_hash = verdict_hash(verdict)
-    start_idx = verdict.current_seg_idx
+    start_idx = verdict.start_seg_idx
     baseline = prev_hash is None
     changed = prev_hash != cur_hash
 
@@ -226,13 +226,13 @@ def _compose(
 
 
 def _next_station(verdict: Verdict, ctx: AlertContext) -> str:
-    return ctx.station(verdict.current_seg_idx + 1)
+    return ctx.station(verdict.start_seg_idx + 1)
 
 
 def _seat_phrase(r: SeatRecommendation, verdict: Verdict, ctx: AlertContext) -> str:
     """좌석 하나의 문구. **"언제부터"를 빠뜨리면 지금 앉을 수 있다고 오해한다** (→ D-46)."""
     until = ctx.alight_station if r.clear_all else ctx.station(r.clear_until_idx)
-    if r.clear_from_idx > verdict.current_seg_idx:
+    if r.clear_from_idx > verdict.start_seg_idx:
         return f"{r.car}-{r.seat_no}({ctx.station(r.clear_from_idx)}부터 {until}까지)"
     return f"{r.car}-{r.seat_no}({until}까지)"
 

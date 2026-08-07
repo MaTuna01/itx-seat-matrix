@@ -26,7 +26,7 @@ from app.auth.session import current_user
 from app.domain.geo import GeoFix, is_fix_usable, project_onto_route
 from app.domain.matrix import query_range
 from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
-from app.domain.timeline import estimate_seg, next_poll_hint
+from app.domain.timeline import estimate_seg, next_poll_hint, sellable_seg_idx
 from app.domain.verdict import build_verdict
 from app.storage import stations as station_repo
 from app.storage.db import db_session
@@ -160,8 +160,17 @@ async def get_matrix(
                 current_seg_idx = gps_idx
                 position_source = "gps"
 
-    # 조회 범위 = 실효 시작 ~ 하차역 (D-17/D-18). 지나온 구간은 호출하지 않는다
-    start_idx, end_idx = query_range(current_seg_idx, board_idx, alight_idx)
+    # 조회 범위 = 실효 시작 ~ 하차역 (D-17/D-18). 지나온 구간은 호출하지 않는다.
+    # 시작은 **위치가 아니라 팔 수 있는 첫 구간**이다 (이슈 #35 → D-47). GPS 보정값도
+    # 반드시 이 함수를 거친다 — GPS는 주행 중인 구간을 정확히 짚어주므로 그대로 쓰면
+    # 오히려 "이미 출발해 팔 수 없는 구간"을 확실히 조회하게 된다
+    sellable_idx = sellable_seg_idx(
+        stops,
+        delay_minutes or 0,
+        now,
+        position_idx=current_seg_idx if position_source == "gps" else None,
+    )
+    start_idx, end_idx = query_range(sellable_idx, board_idx, alight_idx)
     # 60초 TTL 캐시는 **화면 전용**이다 — 새로고침 연타를 흡수한다.
     # 스케줄러는 이 경로를 쓰지 않고 cache=None + SCHEDULER_RETRY로 항상 실조회한다 (D-17).
     # 재시도도 화면용으로 짧게 간다 — 30초×3이면 최악 60초간 응답이 멈춘다 (D-27).
@@ -189,7 +198,7 @@ async def get_matrix(
         status=sub_status,
         board_idx=board_idx,
         alight_idx=alight_idx,
-        current_seg_idx=current_seg_idx,
+        sellable_seg_idx=sellable_idx,
         my_car=my_car,
         my_seat_no=my_seat_no,
     )

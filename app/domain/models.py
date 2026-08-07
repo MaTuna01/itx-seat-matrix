@@ -181,7 +181,10 @@ class Verdict(BaseModel):
     # move_to는 비고 이쪽만 찬다.
     move_to_later: list[SeatRecommendation] = Field(default_factory=list)
     all_sold_after_current: bool = False
-    current_seg_idx: int
+    # 판정·조회의 **시작 구간** = max(팔 수 있는 첫 구간, 탑승역) (D-18, D-47).
+    # `/matrix` 응답 최상위의 `current_seg_idx`(열차 위치)와 **다른 값**이다 —
+    # 열차가 주행 중이면 이 값이 한 구간 앞선다. 둘을 같은 이름으로 둔 것이 이슈 #35였다.
+    start_seg_idx: int
 
 
 # ── 알림 (PLAN 8절, D-16) ────────────────────────────────────────────

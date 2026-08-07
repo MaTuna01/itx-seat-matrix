@@ -102,8 +102,9 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   const { stops, seats, verdict, position_source, delay_minutes } = data;
   const boardIdx = stops.indexOf(data.board_at);
   const alightIdx = stops.indexOf(data.alight_at);
-  // 실효 시작 = max(current_seg_idx, board_idx) — 서버가 이미 적용해 verdict에 담아준다 (D-18)
-  const startIdx = verdict.current_seg_idx;
+  // 실효 시작 = max(팔 수 있는 첫 구간, board_idx) — 서버가 이미 적용해 verdict에 담아준다 (D-18/D-47).
+  // 열차 위치(data.current_seg_idx)와 다르다 — 주행 중이면 이 값이 한 구간 앞선다
+  const startIdx = verdict.start_seg_idx;
   const myKey = data.my_seat_no ? `${data.my_car}-${data.my_seat_no}` : null;
   // 표시 범위는 **내 구간(탑승~하차)뿐이다.** `stops`는 전체 노선이지만(D-18 인덱스 규칙)
   // 내 구간 밖은 애초에 조회하지 않으므로 셀이 UNQUERIED_CELL(=판매됨)로 채워져 있다.

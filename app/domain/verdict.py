@@ -160,16 +160,20 @@ def build_verdict(
     status: SubscriptionStatus,
     board_idx: int,
     alight_idx: int,
-    current_seg_idx: int,
+    sellable_seg_idx: int,
     my_car: int | None = None,
     my_seat_no: str | None = None,
     config: RankingConfig = DEFAULT_RANKING,
 ) -> Verdict:
-    """매트릭스 + 구독 상태 → 판정 (PLAN 5절, D-15/D-18).
+    """매트릭스 + 구독 상태 → 판정 (PLAN 5절, D-15/D-18/D-47).
 
-    실효 시작 = `max(current_seg_idx, board_idx)`. 인덱스는 전부 전체 노선 기준.
+    실효 시작 = `max(팔 수 있는 첫 구간, 탑승역)`. 인덱스는 전부 전체 노선 기준.
+
+    `sellable_seg_idx`에 **열차의 현재 위치를 넣으면 안 된다** — 출발한 구간은 코레일이
+    팔지 않아 빈 응답이 오고, 그것이 '전 좌석 판매됨'으로 읽혀 판정이 뒤집힌다 (이슈 #35).
+    `timeline.sellable_seg_idx()`가 그 값을 만든다.
     """
-    start_idx = min(effective_start_idx(current_seg_idx, board_idx), alight_idx - 1)
+    start_idx = min(effective_start_idx(sellable_seg_idx, board_idx), alight_idx - 1)
     stops = matrix.stops
     enriched = enrich_seats(matrix.seats, start_idx, alight_idx)
 
@@ -252,5 +256,5 @@ def build_verdict(
         move_to=move_to,
         move_to_later=move_to_later,
         all_sold_after_current=all_sold,
-        current_seg_idx=start_idx,
+        start_seg_idx=start_idx,
     )
