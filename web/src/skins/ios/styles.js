@@ -43,8 +43,16 @@ export const css = `
   .iosSwitch:focus-visible { outline: 2px solid ${tk.brandNavy}; outline-offset: 2px; }
   /* 행 전체가 탭 타깃이다 (최소 44pt 규칙) */
   .iosRow:active { background: #ececf1; }
+  /* 좌석 선택 액션 바 — 시트처럼 화면 아래에서 올라온다.
+     translateX(-50%)를 유지해야 393 프레임 가운데에 남는다 */
+  @keyframes iosBarUp {
+    from { transform: translate(-50%, 100%); }
+    to   { transform: translate(-50%, 0); }
+  }
+  .iosActionBar { animation: iosBarUp .22s cubic-bezier(.32,.72,0,1); }
   @media (prefers-reduced-motion: reduce) {
     .iosSwitch, .iosSwitch::after { transition: none; }
+    .iosActionBar { animation: none; }
   }
 `;
 
@@ -223,12 +231,26 @@ export const st = {
   },
 
   // ── 좌석 × 구간 매트릭스 ──
-  matrix: { background: tk.surface, borderRadius: 12, overflow: "hidden", marginTop: 8 },
-  table: { width: "100%", borderCollapse: "collapse" },
+  // 정차역이 많은 노선에서 열 너비가 제각각이 되던 문제를 고쳤다 (실기기에서 발견).
+  // 자동 폭이면 `영등포`(3자) 열이 `안양`(2자) 열보다 넓어져 격자로 읽히지 않는다.
+  // → `tableLayout: fixed`로 구간 열을 균등하게 하고, 11pt가 뭉개지는 폭 아래로는
+  //   줄이는 대신 **가로로 스크롤**한다. 좌석 열은 왼쪽에 고정해 항상 보인다.
+  matrix: {
+    background: tk.surface, borderRadius: 12, marginTop: 8,
+    overflowX: "auto", WebkitOverflowScrolling: "touch",
+  },
+  table: { width: "100%", borderCollapse: "collapse", tableLayout: "fixed" },
   thSeat: { textAlign: "left", fontSize: 11, color: tk.textMuted, padding: "10px 12px 8px" },
-  // 구간 헤더 11pt (설계 규칙: 웹 10.5 → 11)
-  thSeg: { fontSize: 11, color: tk.textMuted, padding: "8px 2px", lineHeight: 1.25, fontWeight: 400 },
+  // 구간 헤더 11pt (설계 규칙: 웹 10.5 → 11). 줄바꿈되면 헤더 높이가 들쭉날쭉해진다
+  thSeg: {
+    fontSize: 11, color: tk.textMuted, padding: "8px 2px", lineHeight: 1.25,
+    fontWeight: 400, whiteSpace: "nowrap",
+  },
   tdSeat: { padding: "8px 12px", fontSize: 15, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" },
+  // 가로 스크롤 중에도 어느 좌석인지 보여야 한다. 배경은 행 선택을 따라가야 하므로
+  // 컴포넌트에서 넣는다 — 여기서 고정하면 선택 하이라이트를 덮는다
+  stickySeat: { position: "sticky", left: 0, zIndex: 1, boxShadow: `1px 0 0 ${tk.separator}` },
+  scrollHint: { fontSize: 13, color: tk.textMuted, textAlign: "right", margin: "6px 2px 0" },
   tdCell: { padding: "6px 3px" },
   cell: {
     height: 28, borderRadius: 6, border: "1px solid", fontSize: 13, fontWeight: 700,
@@ -244,9 +266,22 @@ export const st = {
   },
 
   // ── 하단 액션 바 (좌석 선택 시) ──
+  // **뷰포트에 고정한다.** `screen`이 minHeight라 콘텐츠가 길면 문서가 통째로 스크롤되고,
+  // 흐름에 두면 바가 매트릭스 맨 끝에 앉아 끝까지 내려야 보인다 (실기기에서 발견).
+  // 배경 막(backdrop)은 두지 않는다 — 바를 띄운 채로 다른 좌석을 눌러 비교해야 한다.
   actionBar: {
-    display: "flex", alignItems: "center", gap: 12, padding: "10px 16px 16px",
-    background: tk.surface, borderTop: `1px solid ${tk.separator}`, flex: "0 0 auto",
+    position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 0, zIndex: 20,
+    width: "100%", maxWidth: 393,
+    display: "flex", alignItems: "center", gap: 12,
+    padding: "12px 16px calc(16px + env(safe-area-inset-bottom))",
+    background: tk.surface, borderTop: `1px solid ${tk.separator}`,
+    borderRadius: "14px 14px 0 0",
+    boxShadow: "0 -4px 16px rgba(0,0,0,.12)",
+  },
+  // 선택 해제. 좌석 행을 다시 눌러도 닫히지만 그 행이 화면 밖일 수 있다
+  actionClose: {
+    width: 44, height: 44, marginLeft: -12, flex: "0 0 auto",
+    border: "none", background: "none", color: tk.textMuted, fontSize: 17, cursor: "pointer",
   },
   sitBtn: {
     marginLeft: "auto", height: 44, padding: "0 18px", borderRadius: 12, border: "none",
