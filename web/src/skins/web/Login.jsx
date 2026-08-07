@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "./api";
+import { api } from "../../core/api";
 import { st } from "./styles";
 
 // 최초 1회 로그인 후 세션 쿠키가 유지되므로 홈화면 앱에서 매번 로그인할 일은 없다 (PLAN 6절).

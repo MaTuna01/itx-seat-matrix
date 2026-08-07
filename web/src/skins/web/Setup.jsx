@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api } from "../../core/api";
 import StationPicker from "./StationPicker";
 import { st } from "./styles";
 

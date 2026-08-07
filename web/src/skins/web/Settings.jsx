@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api } from "../../core/api";
 import {
   guessDeviceLabel,
   pushBlockedReason,
   subscribeThisDevice,
   unsubscribeThisDevice,
-} from "./push";
+} from "../../core/push";
 import { st } from "./styles";
 
 // 설정 화면 (PLAN 10절). 계정/가입 관리 + 코레일 연동 + 알림 기기·디스코드 (Phase 3).

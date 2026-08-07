@@ -1,27 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, cacheMatrix, readCachedMatrix } from "./api";
+import { api, cacheMatrix, readCachedMatrix } from "../../core/api";
+import { buildRows, failureSummary, minutesAgo, summarize } from "../../core/format";
 import { st } from "./styles";
 
 // 프로토타입(seat-matrix.jsx)을 API 연동으로 바꾼 화면.
-// 목업 상수(MOCK_RESPONSE)는 GET /api/trains/{train_no}/matrix 응답으로 대체됐고,
-// **판정은 서버(domain/verdict.py)가 계산한 verdict를 그대로 신뢰한다.**
-// 여기서 계산하는 clear_until은 행 정렬·END 태그용 표시 값일 뿐이다.
+// 목업 상수(MOCK_RESPONSE)는 GET /api/trains/{train_no}/matrix 응답으로 대체됐다.
+//
+// **판정 문구는 이 파일이 만들지 않는다** — core/format.js가 문장 조각을 주고 여기서는
+// 강조를 어떻게 그릴지만 정한다 (→ D-50). 스킨마다 문장을 조립하면 web과 iOS가 갈리고,
+// 그러면 뒤처진 쪽이 틀린 정보를 보여주게 된다.
 
-const seatKey = (s) => `${s.car}-${s.seat_no}`;
+const TONE = {
+  ok: "#0e7a4a",
+  warn: "#a05a00",
+  danger: "#c0392b",
+  muted: "#6b7686",
+  navy: "#1a3a6b",
+};
 
-function minutesAgo(iso) {
-  const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
-  return m <= 0 ? "방금" : `${m}분 전`;
-}
-
-// verdict.py의 clear_until과 같은 규칙 (표시 전용)
-function clearUntil(seat, startIdx, alightIdx) {
-  let until = startIdx;
-  for (let i = startIdx; i < alightIdx; i++) {
-    if (seat.cells[i]) break;
-    until = i + 1;
-  }
-  return until;
+// 문장 조각 배열을 그린다. 강조(em)를 <b>로 그리는 것이 web 스킨의 선택이다.
+function Segs({ parts }) {
+  return parts.map((p, i) => (p.em ? <b key={i}>{p.t}</b> : <span key={i}>{p.t}</span>));
 }
 
 export default function SeatMatrix({ subscription, onSubscriptionChange, onReset, onOpenSettings }) {
@@ -123,46 +122,17 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
     .map((s, i) => ({ from: s, to: stops[boardIdx + i + 1], idx: boardIdx + i }));
   const seated = data.sub_status === "SEATED";
 
-  const rows = (() => {
-    const enriched = seats.map((s) => {
-      const until = clearUntil(s, startIdx, alightIdx);
-      return { ...s, key: seatKey(s), clear_until: until, clear_all: until >= alightIdx };
-    });
-    const sorted = enriched.sort(
-      (a, b) =>
-        b.clear_until - a.clear_until ||
-        (seated ? Math.abs(a.car - data.my_car) - Math.abs(b.car - data.my_car) : a.car - b.car) ||
-        a.seat_no.localeCompare(b.seat_no)
-    );
-    // 내 자리는 필터 대상이 아니다 (→ D-49). 필터를 켜는 상황이 곧 "내 자리가 팔려서 대안을
-    // 찾는" 상황인데, 내 자리는 clear_all이 아니라 바로 그때 화면에서 사라진다 — 비교 기준이
-    // 없어지므로 대안이 나은지 판단할 수가 없다.
-    const visible = onlyClear ? sorted.filter((s) => s.clear_all || s.key === myKey) : sorted;
-    if (!seated || !myKey) return visible;
-    const i = visible.findIndex((s) => s.key === myKey);
-    // 내 좌석이 매트릭스에 없을 수 있다 — 잔여 전 구간이 팔리면 유니버스에서 사라진다 (D-18).
-    // 그 경우는 판정이 SOLD_FROM으로 따로 답하므로 여기서는 조용히 넘어간다.
-    if (i <= 0) return visible;
-    return [visible[i], ...visible.slice(0, i), ...visible.slice(i + 1)];
-  })();
-  // 최상단 행의 뜻이 "가장 오래 앉을 수 있는 좌석"에서 "내 자리"로 바뀌므로, 구분선으로
-  // 갈라 두 번째 행부터가 후보임을 보인다. 안 그러면 내 자리가 1순위 추천으로 읽힌다 (D-49)
-  const myPinned = seated && !!myKey && rows.length > 1 && rows[0].key === myKey;
+  // 행 순서와 필터 예외는 core가 정한다 (→ D-49/D-50). myPinned가 true면 최상단이 "내 자리"라
+  // 구분선으로 갈라야 한다 — 안 그러면 내 자리가 1순위 추천으로 읽힌다.
+  const { rows, myPinned } = buildRows({
+    seats, startIdx, alightIdx, seated, myCar: data.my_car, myKey, onlyClear,
+  });
 
-  const bestMove = verdict.move_to.find((m) => m.clear_all);
-  const clearAllCount = verdict.move_to.filter((m) => m.clear_all).length;
   const selectedSeat = rows.find((s) => s.key === selected);
 
-  // 지금은 못 앉지만 몇 정거장 뒤부터 앉을 수 있는 좌석 (D-46).
-  // 두 목록을 합치지 않는다 — 합치면 1순위가 "지금 못 앉는 자리"가 될 수 있다.
-  // 퇴근길처럼 탑승 구간만 매진일 때 move_to는 비고 이쪽만 찬다.
-  const laterList = verdict.move_to_later || [];
-  const laterBest = laterList[0];
-  // 지금 앉을 수 있는 좌석이 하나도 없을 때만 요약 문구를 지연 착석으로 대체한다.
-  // 앉을 수 있으면 그냥 앉으면 되므로 그쪽이 항상 우선이다.
-  const laterOnly = verdict.move_to.length === 0 && !!laterBest;
-  const seatRange = (r) =>
-    `${stops[r.clear_from_idx]}부터 ${r.clear_all ? data.alight_at : stops[r.clear_until_idx]}까지`;
+  // 판정 문구 일체 — 문장은 core가 만든다 (→ D-50)
+  const summary = summarize({ verdict, data, stops, startIdx });
+  const failed = failureSummary(failedSegs, stops);
 
   return (
     <div style={st.page}>
@@ -229,110 +199,44 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
         </div>
       </header>
 
-      {/* ── 판정 카드 (상태별 분기, D-15/D-16) ── */}
+      {/* ── 판정 카드 (문장은 core/format.js, 여기서는 그리기만) ── */}
       <section style={st.verdict}>
-        {verdict.decision_needed === false ? (
-          // 이용 구간의 마지막 구간을 달리는 중 — 팔 수 있는 구간이 없어 조회도 하지 않는다.
-          // 여기서 빈 매트릭스를 그대로 그리면 "전부 매진"으로 읽힌다 (→ D-47)
-          <>
-            <div style={st.verdictLine}>
-              <span style={{ color: "#0e7a4a", fontWeight: 700 }}>곧 {data.alight_at} 도착</span>
-            </div>
-            <p style={st.verdictSub}>이동 판단 불필요 · 남은 구간에 살 수 있는 좌석이 없습니다</p>
-          </>
-        ) : seated ? (
-          <>
-            <div style={st.verdictLine}>
-              <span style={st.seatChip}>내 자리 {data.my_car}호차 {data.my_seat_no}</span>
-              {verdict.my_seat_status === "CLEAR_ALL" && (
-                <span style={{ color: "#0e7a4a", fontWeight: 700 }}>{data.alight_at}까지 안전</span>
-              )}
-              {verdict.my_seat_status === "SOLD_FROM" && (
-                <span style={{ color: "#c0392b", fontWeight: 700 }}>
-                  {verdict.my_seat_sold_from}부터 판매됨
-                </span>
-              )}
-              {verdict.my_seat_status === "UNKNOWN" && (
-                <span style={{ color: "#6b7686", fontWeight: 700 }}>상태 확인 불가</span>
-              )}
-              <button onClick={() => transition({ status: "STANDING" })} style={st.standBtn} disabled={busy}>
-                일어남
-              </button>
-            </div>
-            <p style={st.verdictSub}>
-              {verdict.all_sold_after_current ? (
-                <>남은 구간 잔여 좌석 없음 · <b>지하철 환승</b>이 나을 수 있음</>
-              ) : verdict.my_seat_status === "CLEAR_ALL" ? (
-                <>이동 불필요 · 자리가 팔리면 알림으로 알려드립니다</>
-              ) : bestMove ? (
-                <>
-                  {stops[startIdx]} 도착 전 이동 권장 → <b>{bestMove.car}호차 {bestMove.seat_no}</b>
-                  {clearAllCount > 1 && ` 외 ${clearAllCount - 1}석이 ${data.alight_at}까지 빈 좌석`}
-                </>
-              ) : laterOnly ? (
-                <>
-                  지금 옮길 자리는 없음 · <b>{stops[laterBest.clear_from_idx]}</b>부터{" "}
-                  <b>{laterBest.car}호차 {laterBest.seat_no}</b> ({seatRange(laterBest)})
-                </>
-              ) : (
-                <>끝까지 비는 좌석 없음 · 아래에서 최장 구간 좌석 확인</>
-              )}
-            </p>
-          </>
-        ) : (
-          <>
-            <div style={st.verdictLine}>
-              <span style={{ ...st.seatChip, background: "#fdf3e7", color: "#a05a00" }}>입석</span>
-              {verdict.all_sold_after_current ? (
-                <span style={{ color: "#c0392b", fontWeight: 700 }}>앉을 좌석 없음</span>
-              ) : bestMove ? (
-                <span style={{ color: "#0e7a4a", fontWeight: 700 }}>
-                  {stops[startIdx]}부터 착석 가능
-                </span>
-              ) : laterOnly ? (
-                // 지금은 못 앉는다 — "일부 구간만 착석 가능"보다 **어느 역부터인지**가 정보다
-                <span style={{ color: "#a05a00", fontWeight: 700 }}>
-                  {stops[laterBest.clear_from_idx]}부터 착석 가능
-                </span>
-              ) : (
-                <span style={{ color: "#a05a00", fontWeight: 700 }}>일부 구간만 착석 가능</span>
-              )}
-            </div>
-            <p style={st.verdictSub}>
-              {verdict.all_sold_after_current ? (
-                <>남은 구간 잔여 좌석 없음 · <b>지하철 환승</b>이 나을 수 있음</>
-              ) : bestMove ? (
-                <>
-                  추천 <b>{bestMove.car}호차 {bestMove.seat_no}</b> ({data.alight_at}까지 빈 좌석)
-                  {clearAllCount > 1 && ` 외 ${clearAllCount - 1}석`} ·
-                  좌석을 선택해 "이 자리에 앉음"을 누르면 이후 알림이 그 자리 기준으로 옵니다
-                </>
-              ) : laterOnly ? (
-                <>
-                  추천 <b>{laterBest.car}호차 {laterBest.seat_no}</b> ({seatRange(laterBest)}) ·
-                  미리 그 호차로 이동해 대기하세요
-                </>
-              ) : (
-                <>끝까지 비는 좌석은 없음 · 아래에서 최장 구간 좌석을 골라 앉으세요</>
-              )}
-            </p>
-          </>
-        )}
+        <div style={st.verdictLine}>
+          {summary.chip && (
+            <span
+              style={
+                summary.chip.tone === "warn"
+                  ? { ...st.seatChip, background: "#fdf3e7", color: TONE.warn }
+                  : st.seatChip
+              }
+            >
+              {summary.chip.text}
+            </span>
+          )}
+          {summary.status && (
+            <span style={{ color: TONE[summary.status.tone], fontWeight: 700 }}>
+              {summary.status.text}
+            </span>
+          )}
+          {summary.showStandButton && (
+            <button onClick={() => transition({ status: "STANDING" })} style={st.standBtn} disabled={busy}>
+              일어남
+            </button>
+          )}
+        </div>
+        <p style={st.verdictSub}><Segs parts={summary.detail} /></p>
 
         {/* 지연 착석 목록 — 지금 앉을 수 있는 좌석과 **분리해서** 보여준다 (D-46).
             섞으면 "지금 앉을 수 있는 자리"인지 구분이 사라진다. */}
-        {laterList.length > 0 && !verdict.all_sold_after_current && verdict.decision_needed !== false && (
+        {summary.later && (
           <p style={st.verdictSub}>
-            {verdict.move_to.length > 0 ? "지금은 아니지만 뒤 구간에 빈 자리" : "빈 자리"}:{" "}
-            {laterList.map((r) => `${r.car}-${r.seat_no}(${seatRange(r)})`).join(", ")}
+            {summary.later.label}: {summary.later.seats}
           </p>
         )}
-        {/* 조회 실패 요약 (→ D-48). 매진이 아니라 **모른다**는 것을 문장으로도 말한다 —
-            "수원까지 확인됨"이 정확한 답이고, 그 뒤는 확인하지 못했을 뿐이다. */}
-        {failedSegs.size > 0 && (
-          <p style={{ ...st.verdictSub, color: "#a05a00" }}>
-            ⚠ {[...failedSegs].sort((a, b) => a - b).map((i) => `${stops[i]}→${stops[i + 1]}`).join(", ")}{" "}
-            구간 조회 실패 · 그 구간은 <b>매진이 아니라 알 수 없음</b>입니다
+        {/* 조회 실패 요약 (→ D-48). ⚠는 이 스킨의 어휘라 여기서 붙인다 */}
+        {failed && (
+          <p style={{ ...st.verdictSub, color: TONE.warn }}>
+            ⚠ <Segs parts={failed} />
           </p>
         )}
         {data.next_poll && (
@@ -340,13 +244,14 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             다음 자동 조회: {data.next_poll.station} 도착 {data.next_poll.offset_min}분 전
           </p>
         )}
-        {error && <p style={{ ...st.nextPoll, color: "#c0392b" }}>갱신 실패: {error}</p>}
+        {error && <p style={{ ...st.nextPoll, color: TONE.danger }}>갱신 실패: {error}</p>}
       </section>
 
       {/* ── 필터 + 수동 갱신 + 매트릭스 ── */}
       {/* 판단할 것이 없으면 아무것도 그리지 않는다 — 조회 자체를 하지 않아 좌석이 0개다.
-          빈 표를 그리면 "실제로 조회해 보니 전부 매진"으로 읽힌다 (→ D-47) */}
-      {verdict.decision_needed !== false && (
+          빈 표를 그리면 "실제로 조회해 보니 전부 매진"으로 읽힌다 (→ D-47).
+          그 판단도 core가 내린다 (summary.showMatrix) — 스킨이 응답 필드를 해석하지 않는다 */}
+      {summary.showMatrix && (
       <>
       <div style={st.filterRow}>
         <button
