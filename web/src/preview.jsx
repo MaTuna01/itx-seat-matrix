@@ -23,13 +23,59 @@ const CANNED = {
     { train_no: "4202", train_name: "무궁화", dep_time: "2026-08-06T08:05:00+09:00", arr_time: "2026-08-06T09:31:00+09:00" },
   ],
 };
+
+// 06 입석 — 두 목록(D-46)이 다 보이는 상태로 만든다.
+// 4-12C는 끝까지 비고, 1-2B는 앞 두 구간이 팔려 영등포부터 빈다 = move_to_later
+const STOPS = ["수원", "안양", "영등포", "용산", "청량리"];
+const rec = (car, seat_no, from, until, clear_all) =>
+  ({ car, seat_no, clear_from_idx: from, clear_until_idx: until, clear_all });
+CANNED["/matrix"] = {
+  train_no: "1073", train_name: "ITX-마음", date: "2026-08-07",
+  board_at: "수원", alight_at: "청량리", stops: STOPS,
+  sub_status: "STANDING", current_seg_idx: 0, fetched_at: new Date(Date.now() - 120000).toISOString(),
+  position_source: "timetable", delay_minutes: null, failed_seg_idxs: [],
+  next_poll: { station: "안양", offset_min: 3 },
+  seats: [
+    { car: 4, seat_no: "12C", cells: [false, false, false, false] },
+    { car: 2, seat_no: "3A", cells: [false, false, false, true] },
+    { car: 1, seat_no: "2B", cells: [true, true, false, false] },
+    { car: 3, seat_no: "9C", cells: [true, true, true, true] },
+  ],
+  verdict: {
+    start_seg_idx: 0, decision_needed: true, all_sold_after_current: false,
+    my_seat_status: null, my_seat_sold_from: null,
+    move_to: [rec(4, "12C", 0, 4, true), rec(2, "3A", 0, 3, false)],
+    move_to_later: [rec(1, "2B", 2, 4, true)],
+  },
+};
+
+// 07 착석 — 내 자리(3-7A)가 용산부터 팔렸고 지금 옮길 자리가 없다 = laterOnly.
+// 최상단 고정과 구분선(D-49)은 그리기 쪽이라 스모크가 못 잡는다.
+const SEATED_MATRIX = {
+  ...CANNED["/matrix"],
+  sub_status: "SEATED", my_car: 3, my_seat_no: "7A", current_seg_idx: 1,
+  seats: [
+    { car: 4, seat_no: "12C", cells: [false, true, false, false] },
+    { car: 3, seat_no: "7A", cells: [false, false, false, true] },
+    { car: 3, seat_no: "9C", cells: [true, true, true, true] },
+  ],
+  verdict: {
+    start_seg_idx: 1, decision_needed: true, all_sold_after_current: false,
+    my_seat_status: "SOLD_FROM", my_seat_sold_from: "용산",
+    move_to: [], move_to_later: [rec(4, "12C", 2, 4, true)],
+  },
+};
+
+const seatedMode = new URLSearchParams(location.search).get("state") === "seated";
+
 window.fetch = async (url) => {
   const path = String(url).split("?")[0];
   const hit = Object.keys(CANNED).find((k) => path.endsWith(k));
+  const body = hit === "/matrix" && seatedMode ? SEATED_MATRIX : hit && CANNED[hit];
   return {
     ok: !!hit,
     status: hit ? 200 : 404,
-    json: async () => (hit ? CANNED[hit] : { detail: "preview" }),
+    json: async () => (hit ? body : { detail: "preview" }),
   };
 };
 
@@ -46,6 +92,15 @@ const PROPS = {
   Login: { onLoggedIn: () => {} },
   Settings: { user: USER, onBack: () => {}, onLoggedOut: () => {}, onUserChange: () => {} },
   Setup: { onCreated: () => {}, onOpenSettings: () => {} },
+  SeatMatrix: {
+    subscription: {
+      id: 1, train_no: "1073", date: "2026-08-07", board_at: "수원", alight_at: "청량리",
+      status: "STANDING",
+    },
+    onSubscriptionChange: () => {},
+    onReset: () => {},
+    onOpenSettings: () => {},
+  },
 };
 
 const q = new URLSearchParams(location.search);

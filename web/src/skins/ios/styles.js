@@ -185,6 +185,75 @@ export const st = {
   trainNo: { fontSize: 17, fontWeight: 700 },
   trainTime: { marginLeft: "auto", fontSize: 15, color: tk.textMuted, fontVariantNumeric: "tabular-nums" },
 
+  // ── 노선 진행바 ──
+  routeBar: { display: "flex", marginTop: 12 },
+  routeStop: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" },
+  routeLineWrap: { position: "relative", width: "100%", height: 10, display: "flex", justifyContent: "center" },
+  routeLine: { position: "absolute", right: "50%", top: 4, width: "100%", height: 2 },
+  routeDot: { width: 10, height: 10, borderRadius: "50%", border: "2px solid", zIndex: 1 },
+  routeName: { fontSize: 11, marginTop: 6, whiteSpace: "nowrap" },
+
+  // ── 판정 카드 ──
+  verdict: { background: tk.surface, borderRadius: 12, padding: 14, marginTop: 12 },
+  verdictLine: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  verdictStatus: { fontSize: 17, fontWeight: 700 },
+  verdictSub: { fontSize: 15, lineHeight: 1.4, margin: "8px 0 0" },
+  // 지연 착석 그룹 — 지금 앉을 수 있는 자리와 시각적으로 분리한다 (D-46 결정 ①)
+  laterBlock: { background: "#fdf6ec", borderRadius: 10, padding: "8px 10px", marginTop: 8 },
+  laterLabel: { fontSize: 13, color: "#966a30" },
+  laterSeats: { fontSize: 15, marginTop: 4 },
+  nextPoll: { fontSize: 13, color: tk.textMuted, margin: "8px 0 0" },
+  standBtn: {
+    marginLeft: "auto", border: `1px solid ${tk.borderStrong}`, background: tk.surface,
+    borderRadius: 14, height: 28, padding: "0 12px", fontSize: 13, fontWeight: 700,
+    color: tk.textPrimary, cursor: "pointer",
+  },
+
+  // ── 필터 + 범례 ──
+  filterRow: { display: "flex", alignItems: "center", gap: 10, marginTop: 16 },
+  filterBtn: {
+    height: 36, padding: "0 14px", borderRadius: 18, border: `1px solid ${tk.brandNavy}`,
+    fontSize: 15, fontWeight: 700, cursor: "pointer",
+  },
+  legend: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: tk.textMuted },
+  swatch: { width: 12, height: 12, borderRadius: 3, border: "1px solid", display: "inline-block" },
+  refreshBtn: {
+    width: 36, height: 36, borderRadius: 18, border: `1px solid ${tk.borderStrong}`,
+    background: tk.surface, fontSize: 17, cursor: "pointer", flex: "0 0 auto",
+  },
+
+  // ── 좌석 × 구간 매트릭스 ──
+  matrix: { background: tk.surface, borderRadius: 12, overflow: "hidden", marginTop: 8 },
+  table: { width: "100%", borderCollapse: "collapse" },
+  thSeat: { textAlign: "left", fontSize: 11, color: tk.textMuted, padding: "10px 12px 8px" },
+  // 구간 헤더 11pt (설계 규칙: 웹 10.5 → 11)
+  thSeg: { fontSize: 11, color: tk.textMuted, padding: "8px 2px", lineHeight: 1.25, fontWeight: 400 },
+  tdSeat: { padding: "8px 12px", fontSize: 15, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" },
+  tdCell: { padding: "6px 3px" },
+  cell: {
+    height: 28, borderRadius: 6, border: "1px solid", fontSize: 13, fontWeight: 700,
+    display: "flex", alignItems: "center", justifyContent: "center", color: tk.warn,
+  },
+  mineTag: {
+    marginLeft: 6, fontSize: 10, fontWeight: 800, color: tk.onBrand,
+    background: tk.danger, borderRadius: 4, padding: "2px 5px", verticalAlign: 2,
+  },
+  endTag: {
+    marginLeft: 6, fontSize: 10, fontWeight: 800, color: tk.ok,
+    background: "#eef8f2", borderRadius: 4, padding: "2px 5px", verticalAlign: 2,
+  },
+
+  // ── 하단 액션 바 (좌석 선택 시) ──
+  actionBar: {
+    display: "flex", alignItems: "center", gap: 12, padding: "10px 16px 16px",
+    background: tk.surface, borderTop: `1px solid ${tk.separator}`, flex: "0 0 auto",
+  },
+  sitBtn: {
+    marginLeft: "auto", height: 44, padding: "0 18px", borderRadius: 12, border: "none",
+    background: tk.brandNavy, color: tk.onBrand, fontSize: 15, fontWeight: 700, cursor: "pointer",
+  },
+  hintBar: { padding: "12px 16px 16px", fontSize: 13, color: tk.textMuted, lineHeight: 1.4, flex: "0 0 auto" },
+
   chip: {
     fontSize: 13, fontWeight: 700, height: 28, lineHeight: "28px",
     padding: "0 10px", borderRadius: 14, border: "1px solid", flex: "0 0 auto",

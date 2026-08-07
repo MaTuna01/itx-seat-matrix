@@ -1,17 +1,16 @@
 // iOS 스킨 — iPhone 14 Pro 393×852pt. 피그마 `ios` 페이지가 설계본이다 (→ D-50).
 //
-// Phase 5(#25)에서 화면 단위로 채운다 — 낮은 위험 순서대로
-// **01 로그인 → 10·11 설정 → 02·03·04 → 06·07 매트릭스.**
+// **11화면이 모두 채워졌다** (Phase 5, 이슈 #25). 더 이상 web으로 폴백하는 화면이 없다.
+// 전개(`...web`)는 그대로 둔다 — 앞으로 web에 화면이 추가되면 iOS가 비는 것보다
+// 폴백되는 편이 낫고, 이 파일이 "무엇이 iOS로 덮였는지"의 목록 역할을 한다.
 //
-// 채워지지 않은 화면은 아래 전개(spread)로 web 스킨에 그대로 폴백한다. 그래서 화면을 하나
-// 추가할 때마다 그 화면만 iOS로 바뀌고 나머지는 건드리지 않아도 된다.
-// 폴백을 두지 않으면 "iOS 스킨을 만드는 동안 아이폰에서 앱이 반쪽이 되는" 기간이 생긴다.
-//
-// `css`는 **합친다** — 아직 web 화면이 섞여 있어서 그쪽 전역 스타일(.trainPulse, tr:active)이
-// 여전히 필요하다. iOS 규칙이 뒤에 와서 이긴다. 전부 iOS로 바뀌면 web 쪽을 떼면 된다.
+// `css`는 아직 web + ios를 합친다. web 스킨의 전역 스타일 중 `.trainPulse`(진행바 펄스)를
+// iOS 매트릭스도 쓰기 때문이다. 그 하나를 iOS 쪽으로 옮기면 web 부분을 뗄 수 있다.
 
 import web from "../web";
+import { ErrorScreen, Loading } from "./Boot";
 import Login from "./Login";
+import SeatMatrix from "./SeatMatrix";
 import Settings from "./Settings";
 import Setup from "./Setup";
 import { css as iosCss } from "./styles";
@@ -19,8 +18,10 @@ import { css as iosCss } from "./styles";
 export default {
   ...web,
   css: web.css + iosCss,
+  Loading,
+  ErrorScreen,
   Login,
-  Settings,
   Setup,
-  // Phase 5 남은 화면: SeatMatrix, Loading, ErrorScreen
+  SeatMatrix,
+  Settings,
 };
