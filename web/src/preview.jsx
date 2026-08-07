@@ -75,12 +75,20 @@ const SEATED_MATRIX = {
   },
 };
 
-// `?state=long` — 정차역이 많은 노선. 393pt 안에 구간 열이 몇 개까지 들어가는지 보려면
-// 5개짜리 기본 픽스처로는 부족하다 (실기기에서 헤더가 뭉개진 것이 여기서 재현된다).
-// 좌석도 넉넉히 둬서 문서가 스크롤되게 만든다 — 고정 액션 바를 확인하려면 필요하다.
-// 실기기에서 깨진 그 노선이다 (IMG_8311). 구간 11개 + **네 글자 역**(`창원중앙`)이 함께 있다.
+// 정차역이 많은 노선. 5개짜리 기본 픽스처로는 아무것도 재현되지 않는다 —
+// **목업이 짧으면 목업만 통과한다.** 실기기에서 깨진 두 노선을 그대로 옮겨 뒀다.
+// 좌석도 넉넉히 둬서 문서가 스크롤되게 만든다 — 고정 액션 바는 스크롤이 있어야 드러난다.
+//
+//   `?state=long`    창원→수원 12개역 — 구간 11개 + **네 글자 역**(`창원중앙`)
+//   `?state=longest` 무궁화 용산→광주송정 16개역 — **출발역과 현재 향하는 역이 인접**하다.
+//                    12개역으로는 이 인접이 안 만들어져 진행바 라벨 겹침을 못 봤다.
+//                    (실제 노선은 20개역쯤이고 정차역 목록은 근사값이다 — 겹침 재현이 목적)
 const LONG_STOPS = [
   "창원", "창원중앙", "진영", "밀양", "동대구", "대구", "구미", "김천", "영동", "대전", "천안", "수원",
+];
+const LONGEST_STOPS = [
+  "용산", "영등포", "수원", "평택", "천안", "조치원", "부강", "신탄진", "서대전", "계룡",
+  "논산", "익산", "김제", "정읍", "장성", "광주송정",
 ];
 const LONG_MATRIX = {
   ...CANNED["/matrix"],
@@ -102,13 +110,40 @@ const LONG_MATRIX = {
   },
 };
 
+const LONGEST_MATRIX = {
+  ...CANNED["/matrix"],
+  train_no: "1451", train_name: "무궁화호",
+  stops: LONGEST_STOPS,
+  board_at: "용산",
+  alight_at: "광주송정",
+  current_seg_idx: 0,
+  next_poll: { station: "영등포", offset_min: 10 },
+  seats: Array.from({ length: 14 }, (_, i) => ({
+    car: 1,
+    seat_no: `${i + 1}`,
+    cells: LONGEST_STOPS.slice(0, -1).map((_, j) => j < 5 || (i + j) % 4 !== 0),
+  })),
+  verdict: {
+    ...CANNED["/matrix"].verdict,
+    start_seg_idx: 0,
+    move_to: [],
+    move_to_later: [rec(1, "1", 5, 8, false)],
+  },
+};
+
 const mode = new URLSearchParams(location.search).get("state");
 const seatedMode = mode === "seated";
 
 window.fetch = async (url) => {
   const path = String(url).split("?")[0];
   const hit = Object.keys(CANNED).find((k) => path.endsWith(k));
-  const matrix = seatedMode ? SEATED_MATRIX : mode === "long" ? LONG_MATRIX : CANNED["/matrix"];
+  const matrix = seatedMode
+    ? SEATED_MATRIX
+    : mode === "long"
+    ? LONG_MATRIX
+    : mode === "longest"
+    ? LONGEST_MATRIX
+    : CANNED["/matrix"];
   const body = hit === "/matrix" ? matrix : hit && CANNED[hit];
   return {
     ok: !!hit,
