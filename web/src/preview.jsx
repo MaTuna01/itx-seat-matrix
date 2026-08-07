@@ -66,12 +66,36 @@ const SEATED_MATRIX = {
   },
 };
 
-const seatedMode = new URLSearchParams(location.search).get("state") === "seated";
+// `?state=long` — 정차역이 많은 노선. 393pt 안에 구간 열이 몇 개까지 들어가는지 보려면
+// 5개짜리 기본 픽스처로는 부족하다 (실기기에서 헤더가 뭉개진 것이 여기서 재현된다).
+// 좌석도 넉넉히 둬서 문서가 스크롤되게 만든다 — 고정 액션 바를 확인하려면 필요하다.
+const LONG_STOPS = ["수원", "안양", "광명", "영등포", "용산", "서울", "청량리", "덕소", "양평"];
+const LONG_MATRIX = {
+  ...CANNED["/matrix"],
+  stops: LONG_STOPS,
+  alight_at: "양평",
+  current_seg_idx: 1,
+  seats: Array.from({ length: 9 }, (_, i) => ({
+    car: (i % 4) + 1,
+    seat_no: `${i + 1}${"ABCD"[i % 4]}`,
+    cells: LONG_STOPS.slice(0, -1).map((_, j) => (i + j) % 3 === 0),
+  })),
+  verdict: {
+    ...CANNED["/matrix"].verdict,
+    start_seg_idx: 1,
+    move_to: [rec(4, "12C", 1, 8, true)],
+    move_to_later: [rec(1, "2B", 3, 8, true)],
+  },
+};
+
+const mode = new URLSearchParams(location.search).get("state");
+const seatedMode = mode === "seated";
 
 window.fetch = async (url) => {
   const path = String(url).split("?")[0];
   const hit = Object.keys(CANNED).find((k) => path.endsWith(k));
-  const body = hit === "/matrix" && seatedMode ? SEATED_MATRIX : hit && CANNED[hit];
+  const matrix = seatedMode ? SEATED_MATRIX : mode === "long" ? LONG_MATRIX : CANNED["/matrix"];
+  const body = hit === "/matrix" ? matrix : hit && CANNED[hit];
   return {
     ok: !!hit,
     status: hit ? 200 : 404,
