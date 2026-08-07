@@ -46,6 +46,7 @@ def make_matrix(
     fetched_at: datetime | None = None,
     queried_from_idx: int = 0,
     queried_to_idx: int | None = None,
+    failed_seg_idxs: list[int] | None = None,
 ) -> SeatMatrix:
     """`{"3-7A": [True, False, ...]}` → SeatMatrix."""
     stops = stops or STOPS
@@ -61,6 +62,7 @@ def make_matrix(
         fetched_at=fetched_at or at(8, 14),
         queried_from_idx=queried_from_idx,
         queried_to_idx=len(stops) - 1 if queried_to_idx is None else queried_to_idx,
+        failed_seg_idxs=failed_seg_idxs or [],
     )
 
 

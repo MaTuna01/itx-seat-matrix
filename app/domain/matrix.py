@@ -62,6 +62,7 @@ def merge_seat_maps(
     start_idx: int,
     end_idx: int,
     fetched_at: datetime,
+    failed_seg_idxs: list[int] | None = None,
 ) -> SeatMatrix:
     """구간별 좌석맵을 좌석 키로 조인해 매트릭스를 만든다 (PLAN 5절 4).
 
@@ -72,10 +73,15 @@ def merge_seat_maps(
     Phase 0 항목 6 실측 결과 코레일 응답은 '전체 좌석+상태'라 실제로는 전 구간
     좌석 집합이 동일하다 → 이 규칙은 그 경우 단순 조인과 동일하게 동작한다.
     응답이 부분집합으로 바뀌어도 조용히 틀리지 않도록 규칙 자체는 유지한다.
+
+    `failed_seg_idxs`는 **조회에 실패한 구간**이다 (→ D-48). 셀은 채움값(판매됨)이 되지만
+    그 사실을 매트릭스가 들고 다녀야 화면·판정이 매진과 구분할 수 있다.
     """
     seg_count = len(stops) - 1
     if not (0 <= start_idx <= end_idx <= seg_count):
         raise ValueError(f"조회 범위가 올바르지 않다: [{start_idx}, {end_idx}) / 구간 {seg_count}개")
+
+    failed = sorted(set(failed_seg_idxs or ()))
 
     # 유니버스 = 합집합. 좌석 메타(car, seat_no)도 함께 보관한다.
     universe: dict[str, tuple[int, str]] = {}
@@ -83,6 +89,8 @@ def merge_seat_maps(
     for seg_idx in range(start_idx, end_idx):
         seat_map = seat_maps.get(seg_idx)
         if seat_map is None:
+            if seg_idx in failed:
+                continue  # 조회 실패 — 채움값(판매됨)으로 남는다. 아래에서 표시로 구분한다
             raise ValueError(f"구간 {seg_idx}의 좌석맵이 없다 (조회 범위 불일치)")
         by_key: dict[str, bool] = {}
         for seat in seat_map.seats:
@@ -95,6 +103,8 @@ def merge_seat_maps(
     for key, (car, seat_no) in universe.items():
         cells = [UNQUERIED_CELL] * seg_count
         for seg_idx in range(start_idx, end_idx):
+            if seg_idx not in sold_by_seg:
+                continue  # 조회 실패 구간 — 채움값 유지 (D-48)
             cells[seg_idx] = sold_by_seg[seg_idx].get(key, True)  # 부재 = 판매 (D-18)
         rows.append(SeatRow(car=car, seat_no=seat_no, cells=cells))
 
@@ -107,4 +117,5 @@ def merge_seat_maps(
         fetched_at=fetched_at,
         queried_from_idx=start_idx,
         queried_to_idx=end_idx,
+        failed_seg_idxs=[i for i in failed if start_idx <= i < end_idx],
     )

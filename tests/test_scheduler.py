@@ -58,6 +58,8 @@ class FakePort:
         # 코레일이 **빈 응답**을 주는 구간. 이미 출발한 구간이 여기 들어간다 (→ D-47).
         # 어댑터는 이것을 '전 좌석 판매됨'으로 흡수한다 (D-36).
         self.empty_segments: set[int] = set()
+        # 조회가 **실패**하는 구간 (→ D-48). 빈 응답(= 매진)과 전혀 다른 상태다
+        self.failing_segments: set[int] = set()
 
     async def get_stops(self, cred, train_no: str, d: _date) -> list[StopInfo]:
         if self.stops_error is not None:
@@ -77,6 +79,8 @@ class FakePort:
         if self.seat_map_error is not None:
             raise self.seat_map_error
         seg_idx = STOPS.index(frm)
+        if seg_idx in self.failing_segments:
+            raise ConnectionError(f"구간 {seg_idx} 조회 실패")
         return SeatMap(
             train_no=train_no,
             date=d,
@@ -702,3 +706,48 @@ async def test_자격증명_복호화_실패는_조용히_끊기지_않는다(db
     assert len(port.seat_map_calls) == 1
     # 포인터는 전진한다 (그 시점 포기, D-17)
     assert row_of(db, sub_id)["next_poll_at"] == to_db(at(8, 44))
+
+
+# ── 구간 단위 부분 실패 (이슈 #40 → D-48) ────────────────────────────
+async def test_일부_구간_실패는_알림을_보류하고_해시를_지킨다(db):
+    """★ 회귀 방어. **불완전한 관측으로는 알리지 않는다.**
+
+    실패한 관측으로 해시를 덮으면 실패 → 복구가 그 자체로 "상태 변화"가 되어,
+    좌석이 하나도 안 팔렸는데 알림이 두 번 나간다. 해시를 그대로 두면 다음 완전한
+    조회가 **마지막 완전한 관측**과 비교되므로 그 요동이 애초에 생기지 않는다.
+    """
+    port, spy = FakePort(cells()), SpyNotifier()
+    deps = deps_for(db, port, spy)
+    sub_id = make_sub(db, status="SEATED", my_car=3, my_seat_no="7A")
+
+    await run_tick(deps, now=SUWON_POINT_10)  # 완전한 조회 — 베이스라인 1건
+    assert len(spy.notes) == 1
+    hash_before = row_of(db, sub_id)["last_verdict_hash"]
+    snapshot_before = row_of(db, sub_id)["last_cells_snapshot"]
+    spy.notes.clear()
+
+    # 한 구간만 실패한다 (매진이 아니라 조회 실패다)
+    port.failing_segments = {2}
+    report = await run_tick(deps, now=SUWON_POINT_4)
+
+    assert spy.kinds == [], f"불완전한 관측으로 알림이 나갔다: {spy.kinds}"
+    assert sub_id in report.polled
+    row = row_of(db, sub_id)
+    assert row["last_verdict_hash"] == hash_before, "실패한 관측이 해시를 덮었다"
+    assert row["last_cells_snapshot"] == snapshot_before
+    # FETCH_FAILED는 전 구간 실패의 신호다 — 부분 실패로 fail_count를 올리지 않는다
+    assert row["fail_count"] == 0
+    # 그 시점은 포기하고 포인터는 전진한다 (D-17)
+    assert row["next_poll_at"] == to_db(at(8, 28))
+
+
+async def test_전_구간_실패는_기존대로_FETCH_FAILED다(db):
+    """부분 실패와 전 구간 실패는 다르다 — 보여줄 것이 없으면 실패가 맞다 (D-34)."""
+    port, spy = FakePort(cells()), SpyNotifier()
+    deps = deps_for(db, port, spy)
+    sub_id = make_sub(db, status="STANDING", board_at="영등포", alight_at="서울")
+    port.failing_segments = {4}  # 구간 1개짜리 이용구간 → 전 구간 실패
+
+    await run_tick(deps, now=at(8, 38))
+    assert spy.kinds == ["FETCH_FAILED"]
+    assert row_of(db, sub_id)["fail_count"] == 1

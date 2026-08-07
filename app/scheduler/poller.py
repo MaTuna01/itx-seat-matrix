@@ -216,6 +216,24 @@ async def _run_one(
         return
 
     report.polled.append(sub_id)
+
+    if matrix.failed_seg_idxs:
+        # 일부 구간만 조회에 실패했다 (→ D-48). **불완전한 관측으로는 알리지 않는다.**
+        #
+        # 판정 자체는 실패 구간에서 멈추도록 이미 보수적이지만, 문제는 상태 비교다:
+        # 실패한 관측으로 해시를 덮으면 실패 → 복구가 그 자체로 "상태 변화"가 되어
+        # 좌석이 하나도 안 팔렸는데 알림이 두 번 나간다. 해시를 그대로 두면 다음 완전한
+        # 조회가 **마지막 완전한 관측**과 비교되므로 그 요동이 애초에 생기지 않는다.
+        #
+        # 화면은 부분 결과를 그대로 보여준다 — 사람이 직접 보고 판단하는 경로이므로
+        # "수원까지만 확인됨"이 유용하다. 알림은 그렇지 않다.
+        # `fail_count`는 건드리지 않는다. FETCH_FAILED(D-34)는 전 구간 실패의 신호다
+        _set_pointer(conn, sub_id, decision.next_poll_at)
+        report.notes.append(
+            f"구독 {sub_id}: 구간 {matrix.failed_seg_idxs} 조회 실패 → 부분 결과, 알림 보류"
+        )
+        return
+
     status = SubscriptionStatus(row["status"])
     my_car, my_seat_no = row["my_car"], row["my_seat_no"]
     verdict = build_verdict(

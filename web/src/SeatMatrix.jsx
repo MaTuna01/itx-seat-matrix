@@ -108,6 +108,10 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   // 진행바는 **열차 위치**를 그린다 — 판정 시작(startIdx)이 아니다 (→ D-47).
   // 주행 중에는 startIdx가 한 구간 앞서므로 그대로 쓰면 열차가 한 역 앞에 있는 것처럼 보인다.
   const posIdx = data.current_seg_idx ?? startIdx;
+  // 조회에 실패한 구간 (→ D-48). **매진과 반드시 구분해서 그린다** — 셀은 bool 하나라
+  // 실패 구간도 '판매됨'으로 내려오므로, 이 집합 없이는 화면이 둘을 구분할 수 없다.
+  // 관측하지 않은 값이 관측값처럼 읽히는 것이 D-31·#35가 밟은 함정이다.
+  const failedSegs = new Set(data.failed_seg_idxs || []);
   const myKey = data.my_seat_no ? `${data.my_car}-${data.my_seat_no}` : null;
   // 표시 범위는 **내 구간(탑승~하차)뿐이다.** `stops`는 전체 노선이지만(D-18 인덱스 규칙)
   // 내 구간 밖은 애초에 조회하지 않으므로 셀이 UNQUERIED_CELL(=판매됨)로 채워져 있다.
@@ -311,6 +315,14 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             {laterList.map((r) => `${r.car}-${r.seat_no}(${seatRange(r)})`).join(", ")}
           </p>
         )}
+        {/* 조회 실패 요약 (→ D-48). 매진이 아니라 **모른다**는 것을 문장으로도 말한다 —
+            "수원까지 확인됨"이 정확한 답이고, 그 뒤는 확인하지 못했을 뿐이다. */}
+        {failedSegs.size > 0 && (
+          <p style={{ ...st.verdictSub, color: "#a05a00" }}>
+            ⚠ {[...failedSegs].sort((a, b) => a - b).map((i) => `${stops[i]}→${stops[i + 1]}`).join(", ")}{" "}
+            구간 조회 실패 · 그 구간은 <b>매진이 아니라 알 수 없음</b>입니다
+          </p>
+        )}
         {data.next_poll && (
           <p style={st.nextPoll}>
             다음 자동 조회: {data.next_poll.station} 도착 {data.next_poll.offset_min}분 전
@@ -339,6 +351,12 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           <span style={st.legend}>
             <i style={{ ...st.sw, background: "#e9f7ef", borderColor: "#bfe5cf" }} />빈자리
             <i style={{ ...st.sw, background: "#f6d5d0", borderColor: "#eab5ad", marginLeft: 8 }} />판매
+            {failedSegs.size > 0 && (
+              <>
+                <i style={{ ...st.sw, background: "#fdf3e7", borderColor: "#e8c9a0", marginLeft: 8 }} />
+                조회 실패
+              </>
+            )}
           </span>
           <button style={st.refreshBtn} title="지금 조회" onClick={load} disabled={busy}>↻</button>
         </div>
@@ -353,7 +371,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
               {segments.map((seg) => (
                 <th key={seg.idx} style={{ ...st.thSeg, opacity: seg.idx < startIdx ? 0.35 : 1 }}>
                   <div>{seg.from}</div>
-                  <div style={st.thArrow}>↓</div>
+                  <div style={st.thArrow}>{failedSegs.has(seg.idx) ? "?" : "↓"}</div>
                   <div>{seg.to}</div>
                 </th>
               ))}
@@ -377,15 +395,32 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                   {segments.map((seg) => {
                     const sold = s.cells[seg.idx];
                     const past = seg.idx < startIdx;
+                    // 실패는 지나온 구간보다 먼저 본다 — 조회 범위 안에서만 실패가 생긴다
+                    const unknown = failedSegs.has(seg.idx);
                     return (
                       <td key={seg.idx} style={st.tdCell}>
                         <div
                           style={{
                             ...st.cell,
-                            background: past ? "#f0f2f5" : sold ? "#f6d5d0" : "#e9f7ef",
-                            borderColor: past ? "#e2e6eb" : sold ? "#eab5ad" : "#bfe5cf",
+                            ...(unknown ? st.cellUnknown : null),
+                            background: unknown
+                              ? "#fdf3e7"
+                              : past
+                              ? "#f0f2f5"
+                              : sold
+                              ? "#f6d5d0"
+                              : "#e9f7ef",
+                            borderColor: unknown
+                              ? "#e8c9a0"
+                              : past
+                              ? "#e2e6eb"
+                              : sold
+                              ? "#eab5ad"
+                              : "#bfe5cf",
                           }}
-                        />
+                        >
+                          {unknown ? "?" : ""}
+                        </div>
                       </td>
                     );
                   })}

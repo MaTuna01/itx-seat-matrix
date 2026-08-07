@@ -238,6 +238,16 @@ def build_verdict(
     # 퇴근길(영등포→천안, 영등포-수원만 매진)에서 실제로 겪었다 (→ D-45).
     all_sold = all(all(seat.cells[start_idx:alight_idx]) for seat in enriched)
 
+    # 조회에 실패한 구간이 남은 범위에 있으면 **매진이라고 말하지 않는다** (→ D-48).
+    # 실패 구간의 셀은 채움값(판매됨)이라 위 식에 그대로 섞여 들어간다 — 그대로 두면
+    # 네트워크가 한 번 튄 것이 "남은 구간 잔여 없음 · 지하철 환승 고려"가 되어 나간다.
+    # 모르는 것을 매진으로 부르지 않는다는 점에서 D-47의 `all([])` 분기와 같은 논리다.
+    #
+    # `clear_until`은 반대로 **그대로 둔다.** 실패 구간에서 멈추는 것이 맞다 —
+    # 그 뒤를 확인하지 못했으므로 "여기까지 확인됨"이 정확한 답이다 (소유자 결정).
+    if any(start_idx <= i < alight_idx for i in matrix.failed_seg_idxs):
+        all_sold = False
+
     my_seat_status = None
     my_seat_sold_from = None
     my_seat_clear_until_idx = None
