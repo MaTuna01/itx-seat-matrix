@@ -97,4 +97,54 @@ export const st = {
     width: "100%", padding: "8px 0", border: "none", background: "none",
     color: tk.brandNavy, fontSize: 17, fontWeight: 700, cursor: "pointer",
   },
+
+  // ── 모달 시트 (설정 등). 상단 56pt를 남겨 뒤 화면이 비쳐 보인다 ──
+  sheetBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.28)" },
+  sheet: {
+    position: "fixed", left: "50%", transform: "translateX(-50%)",
+    top: 56, bottom: 0, width: "100%", maxWidth: 393,
+    background: tk.bgGrouped, borderRadius: "12px 12px 0 0",
+    display: "flex", flexDirection: "column", overflow: "hidden",
+  },
+  grabber: { width: 36, height: 5, borderRadius: 3, background: "#c9c9cf", margin: "8px auto 0" },
+  sheetBar: {
+    display: "flex", alignItems: "center", height: 44, padding: "0 16px", flex: "0 0 auto",
+  },
+  sheetTitle: { flex: 1, textAlign: "center", fontSize: 17, fontWeight: 700 },
+  sheetAction: {
+    minWidth: 56, border: "none", background: "none", color: tk.brandNavy,
+    fontSize: 17, fontWeight: 700, cursor: "pointer", padding: 0,
+  },
+  sheetBody: { flex: 1, overflowY: "auto", padding: "0 16px 32px" },
+
+  // ── 그룹 리스트 ──
+  // 섹션 라벨은 그룹보다 16pt 더 안쪽이다 (화면 기준 32pt)
+  sectionLabel: { fontSize: 13, color: tk.textMuted, padding: "0 16px", margin: "24px 0 8px" },
+  footnote: { fontSize: 13, color: tk.textMuted, lineHeight: 1.35, padding: "0 16px", margin: "8px 0 0" },
+  footnoteWarn: { fontSize: 13, color: tk.warn, lineHeight: 1.35, padding: "0 16px", margin: "8px 0 0" },
+  footnoteError: { fontSize: 13, color: tk.danger, lineHeight: 1.35, padding: "0 16px", margin: "8px 0 0" },
+
+  row: { display: "flex", alignItems: "center", gap: 12, minHeight: 50, padding: "0 16px", fontSize: 17 },
+  rowLabel: { flex: 1, minWidth: 0 },
+  rowValue: { color: tk.textMuted, fontSize: 17, flex: "0 0 auto" },
+  // 전체가 눌리는 행 — 최소 44pt를 넘긴다
+  actionRow: {
+    display: "flex", alignItems: "center", width: "100%", minHeight: 50, padding: "0 16px",
+    border: "none", background: "none", font: "inherit", fontSize: 17, textAlign: "left",
+    color: tk.brandNavy, cursor: "pointer",
+  },
+  destructiveRow: { color: tk.danger },
+  // 값 옆의 작은 텍스트 버튼 (해제 등)
+  rowBtn: {
+    border: "none", background: "none", color: tk.brandNavy, fontSize: 15,
+    cursor: "pointer", padding: "8px 0 8px 8px", flex: "0 0 auto",
+  },
+
+  chip: {
+    fontSize: 13, fontWeight: 700, height: 28, lineHeight: "28px",
+    padding: "0 10px", borderRadius: 14, border: "1px solid", flex: "0 0 auto",
+  },
+  chipOK: { background: "#eef8f2", color: tk.ok, borderColor: "#bfe5cf" },
+  chipNavy: { background: "#eef3fb", color: tk.brandNavy, borderColor: "#c6d4ea" },
+  chipMuted: { background: "#f0f2f5", color: tk.textMuted, borderColor: "#e2e6eb" },
 };

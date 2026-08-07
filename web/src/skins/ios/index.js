@@ -12,11 +12,13 @@
 
 import web from "../web";
 import Login from "./Login";
+import Settings from "./Settings";
 import { css as iosCss } from "./styles";
 
 export default {
   ...web,
   css: web.css + iosCss,
   Login,
-  // Phase 5 남은 화면: Settings, Setup, SeatMatrix, Loading, ErrorScreen
+  Settings,
+  // Phase 5 남은 화면: Setup, SeatMatrix, Loading, ErrorScreen
 };
