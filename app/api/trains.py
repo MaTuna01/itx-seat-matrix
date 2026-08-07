@@ -60,6 +60,9 @@ class MatrixOut(BaseModel):
     my_car: int | None
     my_seat_no: str | None
     seats: list[SeatRowOut]
+    # 조회에 실패한 구간 (→ D-48). 셀은 채움값(판매됨)으로 들어가므로 이 값이 없으면
+    # **화면이 조회 실패와 매진을 구분할 수 없다** — 사용자에게 전혀 다른 정보다
+    failed_seg_idxs: list[int]
     verdict: Verdict
     next_poll: NextPollOut | None
     fetched_at: datetime
@@ -218,6 +221,7 @@ async def get_matrix(
         my_car=my_car,
         my_seat_no=my_seat_no,
         seats=[SeatRowOut(car=s.car, seat_no=s.seat_no, cells=s.cells) for s in matrix.seats],
+        failed_seg_idxs=matrix.failed_seg_idxs,
         verdict=verdict,
         next_poll=NextPollOut(station=hint.station, offset_min=hint.offset_min) if hint else None,
         fetched_at=matrix.fetched_at,

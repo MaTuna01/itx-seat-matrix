@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from dataclasses import dataclass
 from datetime import date as _date
@@ -23,6 +24,8 @@ from typing import Awaitable, Callable, Protocol
 from app.adapters.korail_port import KorailPort
 from app.domain.matrix import merge_seat_maps
 from app.domain.models import KorailCred, SeatMap, SeatMatrix
+
+log = logging.getLogger(__name__)
 
 MAX_CONCURRENCY = 3
 JITTER_RANGE = (0.1, 0.4)
@@ -88,6 +91,23 @@ async def _with_retry(
     raise last
 
 
+@dataclass(frozen=True)
+class SegmentMaps:
+    """구간별 조회 결과 + **실패한 구간** (→ D-48).
+
+    한 구간의 실패가 매트릭스 전체를 죽이면 안 된다 — "수원까지는 앉을 수 있다"가 가장
+    쓸모 있는 정보인데 그게 통째로 사라진다. D-36이 매진 한 가지 사유에만 적용했던 판단을
+    **실패 사유 전반**으로 넓힌 것이다. 코레일 코드표를 쫓아다니지 않아도 견딘다.
+    """
+
+    maps: dict[int, SeatMap]
+    failed: dict[int, Exception]
+
+    @property
+    def failed_idxs(self) -> list[int]:
+        return sorted(self.failed)
+
+
 async def fetch_segment_maps(
     port: KorailPort,
     cred: KorailCred | None,
@@ -103,11 +123,16 @@ async def fetch_segment_maps(
     retry: RetryPolicy = DEFAULT_RETRY,
     now: datetime | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-) -> dict[int, SeatMap]:
+) -> SegmentMaps:
     """`[start_idx, end_idx)` 구간의 좌석맵을 병렬 조회한다.
 
     `cache`가 주어지면 TTL 내 항목은 코레일을 호출하지 않는다. **스케줄러는 넘기지 마라**
     — 캐시된 값으로 판정하면 상태 변화를 놓치고 알림이 조용히 안 온다 (D-17).
+
+    **구간 단위 실패는 예외로 올리지 않는다** (→ D-48). 실패한 구간만 `failed`에 담고
+    나머지 결과는 살린다. 단 **조회한 구간이 전부 실패하면** 첫 예외를 그대로 올린다 —
+    보여줄 것이 없을 때는 실패가 맞고, `CredentialsRequired`(→409) 같은 예외 타입이
+    호출부의 상태코드 매핑에 필요하다.
     """
     sem = asyncio.Semaphore(concurrency)
 
@@ -130,8 +155,27 @@ async def fetch_segment_maps(
             cache.put(seat_map)
         return seg_idx, seat_map
 
-    results = await asyncio.gather(*(fetch(i) for i in range(start_idx, end_idx)))
-    return dict(results)
+    segments = list(range(start_idx, end_idx))
+    # `return_exceptions=True`가 이 격리의 핵심이다. 없으면 첫 예외가 그대로 올라가면서
+    # **이미 성공적으로 받아온 다른 구간의 좌석표까지 버려진다** (이슈 #40).
+    results = await asyncio.gather(
+        *(fetch(i) for i in segments), return_exceptions=True
+    )
+
+    maps: dict[int, SeatMap] = {}
+    failed: dict[int, Exception] = {}
+    for seg_idx, result in zip(segments, results):
+        if isinstance(result, BaseException):
+            if not isinstance(result, Exception):
+                raise result  # 취소·KeyboardInterrupt 등은 삼키지 않는다
+            log.warning("구간 %s 좌석맵 조회 실패: %s", seg_idx, result)
+            failed[seg_idx] = result
+        else:
+            maps[result[0]] = result[1]
+
+    if segments and not maps:
+        raise failed[segments[0]]
+    return SegmentMaps(maps=maps, failed=failed)
 
 
 async def fetch_matrix(
@@ -150,7 +194,7 @@ async def fetch_matrix(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> SeatMatrix:
     """조회 + 병합. `now`는 호출자가 주입한다 (fetched_at, D-21)."""
-    seat_maps = await fetch_segment_maps(
+    fetched = await fetch_segment_maps(
         port,
         cred,
         train_no,
@@ -168,8 +212,9 @@ async def fetch_matrix(
         train_no=train_no,
         date=d,
         stops=stops,
-        seat_maps=seat_maps,
+        seat_maps=fetched.maps,
         start_idx=start_idx,
         end_idx=end_idx,
         fetched_at=now,
+        failed_seg_idxs=fetched.failed_idxs,
     )

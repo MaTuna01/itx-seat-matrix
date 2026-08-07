@@ -150,6 +150,13 @@ class SeatMatrix(BaseModel):
     # 실제 조회한 구간 범위 [start_idx, end_idx). 범위 밖 셀은 채움값이다 (matrix.py 참고)
     queried_from_idx: int
     queried_to_idx: int
+    # 조회 범위 안에서 **실패한** 구간 인덱스 (→ D-48). 전체 노선 기준.
+    #
+    # 셀은 `bool` 하나라 실패 구간도 채움값(판매됨)으로 들어간다. 그것을 그대로 두면
+    # **조회 실패가 매진으로 읽힌다** — 사용자에게 전혀 다른 정보인데 화면에서 구분이
+    # 사라진다 (D-31이 지적한 함정, #35가 실제로 밟은 함정). 그래서 "어디가 관측값이
+    # 아닌지"를 매트릭스가 직접 들고 다닌다.
+    failed_seg_idxs: list[int] = Field(default_factory=list)
 
 
 class SeatRecommendation(BaseModel):
