@@ -6,6 +6,9 @@
 접근 경로는 **A(Tailscale serve) 유지**로 확정했다 (D-38). 공개 노출로 전환하려면 D-38의
 전환 트리거를 먼저 읽어라 — 오리진이 바뀌면 기기마다 알림을 다시 켜야 한다 (D-34).
 
+> **1~8절은 처음 한 번의 절차다.** 그 뒤의 재배포는 `dev → main` 머지로 자동화돼 있다
+> (9절 "CD 사전 준비"·"재배포", D-51). 6절의 손 빌드는 폴백으로 남는다.
+
 ---
 
 ## 0. 3대가 관여한다 — 무엇이 어디서 나오는지
@@ -548,11 +551,127 @@ print(c.execute('select id, substr(endpoint,1,45), created_at from push_device')
 
 ## 9. 운영
 
-### 재배포
+### CD 사전 준비 — **한 번만 한다** (#22, D-51)
 
-**배포 대상은 `main`이다.** `dev`에서 작업하고, 배포할 때 `dev → main` PR을 올려 머지한
-뒤(소유자가 직접 — CLAUDE.md 6) **양쪽 모두 `main`을 pull한다.** 그래야 "지금 서버에 뭐가
-올라가 있나"가 `main` 하나로 답이 된다.
+`.github/workflows/cd.yml`이 `main` 푸시에서 자동 배포한다. 저장소에 담을 수 없는 준비물이
+셋 있고, **없으면 워크플로가 `tailscale up`에서 멈춘다.**
+
+**순서를 지켜라 — ACL이 OAuth보다 먼저다.** `tag:ci`가 `tagOwners`에 없으면 OAuth 클라이언트에
+그 태그를 붙일 수 없다.
+
+**① ACL** — admin → Access controls. 러너는 **korail-matrix의 22번 하나만** 열어준다.
+`hosts`의 IP는 `tailscale ip -4 korail-matrix`로 확인한다.
+
+**★ `korail-matrix`에 `tag:server`를 붙인다.** Tailscale SSH는 **`dst`에 사용자(이메일)를
+쓰면 `src`가 같은 사용자여야 한다** — "내 기기 → 내 기기"만 표현할 수 있는 형태라, 태그에서
+출발하는 규칙은 목적지도 태그여야 한다 (`users in dst are only allowed from the same user`).
+
+```jsonc
+"tagOwners": {
+    "tag:ci":     ["ma775100@gmail.com"],
+    "tag:server": ["ma775100@gmail.com"],
+},
+"hosts": { "korail-matrix": "100.x.y.z" },
+
+"grants": [
+    // ★ 기본 템플릿의 {"src": ["*"] …} 를 이걸로 바꾼다. 내 기기들끼리는 그대로 열려 있고,
+    //   **태그는 member가 아니므로** 러너가 이 포괄 규칙을 타지 못한다
+    {"src": ["autogroup:member"], "dst": ["*"], "ip": ["*"]},
+    // 러너에게 허용된 것은 이것뿐이다
+    {"src": ["tag:ci"], "dst": ["tag:server"], "ip": ["tcp:22"]},
+],
+
+"ssh": [
+    // ① 내 기기 → 내 기기 (아이맥 등). 태그가 없는 노드용 — 지우지 마라
+    {"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"],
+     "users": ["autogroup:nonroot", "root"]},
+    // ② 내 기기 → 서버. ★ 태그를 붙이는 순간 korail-matrix 는 autogroup:self 로 잡히지
+    //    않는다. **이 규칙이 없으면 내가 SSH를 잃는다** (인바운드 0개라 되돌릴 길이 없다)
+    {"action": "accept", "src": ["autogroup:member"], "dst": ["tag:server"],
+     "users": ["ubuntu", "autogroup:nonroot"]},
+    // ③ CI 러너 → 서버. "check"가 아니라 "accept"다 — check는 브라우저 재인증을 요구하고
+    //    CI에는 브라우저가 없다
+    {"action": "accept", "src": ["tag:ci"], "dst": ["tag:server"],
+     "users": ["ubuntu"]},
+],
+
+```
+
+> `grants`(신 문법)를 쓰는 tailnet이면 `acls`(구 문법)를 함께 두지 마라 — 역할이 겹친다.
+>
+> **`tests`는 아직 넣지 마라.** ACL 테스트는 *지금 tailnet에 있는 기기*로 평가하는데
+> `korail-matrix`에 태그가 붙기 전에는 `dst: tag:server`에 걸리는 기기가 없어
+> `want: Accept, got: Drop`으로 **저장 자체가 막힌다** (닭·달걀이다). 아래 ②의 5번에서
+> 태그를 붙인 뒤에 추가한다.
+
+**② 태그 붙이기 — 락아웃 주의.** 순서를 지켜라. **먼저 `ssh ubuntu@korail-matrix` 세션을
+하나 열어둔 채로 시작한다** (이미 열린 세션은 ACL을 바꿔도 끊기지 않는다. 보험이다).
+
+1. 위 정책을 저장한다 (`tests` 없이). 아직 태그가 없으므로 규칙 ①이 SSH를 유지한다
+2. **새 터미널**에서 `ssh ubuntu@korail-matrix` 확인
+3. Machines → `korail-matrix` → ⋯ → **Edit ACL tags** → `tag:server`.
+   **`tailscale up`을 다시 돌리지 마라** — 재인증이 걸려 세션이 끊긴다
+4. **다시 새 터미널**에서 `ssh ubuntu@korail-matrix` 확인. 이번엔 규칙 ②를 탄다 — 여기가 관문이다
+5. 이제 `tests`를 넣고 저장한다. 이번엔 통과한다:
+
+```jsonc
+"tests": [
+    {"src": "tag:ci", "accept": ["korail-matrix:22"], "deny": ["korail-matrix:443"]},
+],
+```
+
+안 되면 열어둔 세션에서 정책을 되돌린다. 그마저 잃었으면 복구는 **EC2 콘솔에서 보안그룹에
+22번을 임시로 다시 열고 원래 키페어로 접속**하는 경로다 (t4g는 Nitro라 시리얼 콘솔도 된다).
+
+> **덤**: 태그가 붙은 노드는 key expiry가 적용되지 않는다 — 3절이 걱정하던 "반년 뒤 어느 날
+> 조용히 끊긴다"가 구조적으로 사라진다.
+
+**③ OAuth 클라이언트 → GitHub 시크릿** — [admin → Settings → OAuth clients](https://login.tailscale.com/admin/settings/oauth).
+`auth_keys` **쓰기** 권한 + 태그 `tag:ci`. secret은 **이 화면을 벗어나면 다시 못 본다.**
+발급된 값을 GitHub 저장소 **Settings → Secrets and variables → Actions**에 넣는다:
+
+| 시크릿 | 값 |
+|---|---|
+| `TS_OAUTH_CLIENT_ID` | OAuth client ID |
+| `TS_OAUTH_SECRET` | OAuth client secret (`tskey-client-…`) |
+
+**④ 확인** — 위를 다 넣은 뒤 **출근 시간대를 피해** Actions 탭에서 CD를 `workflow_dispatch`로
+한 번 돌린다. 러너가 `gh-cd`라는 이름의 일회용 노드로 tailnet에 들어왔다 나가는 것이
+admin 콘솔 Machines에 보인다.
+
+> `production` Environment는 미리 만들지 않아도 첫 실행에서 자동 생성된다. 승인자는 두지
+> 않는다 — 재배포 타이밍은 아래 폴 포인트 가드가 대신 지킨다.
+
+### 재배포 — **`dev → main` 머지가 곧 배포다**
+
+`dev`에서 작업하고 `dev → main` PR을 올려 머지하면(소유자가 직접 — CLAUDE.md 6) CD가
+**테스트 → arm64 빌드 → 폴 포인트 가드 → 전송 → 기동 → `deploy_check.sh`**까지 한다.
+서버의 작업 트리도 배포한 커밋으로 맞춰지므로 "지금 서버에 뭐가 올라가 있나"는 여전히
+`main` 하나로 답이 된다.
+
+**폴 포인트 가드.** 자동 배포 = 컨테이너 재시작이다. `next_poll_at` 포인터가 재시작을 흡수하고
+(D-19) 2분 이내 지각이면 즉시 실행되지만, **폴 포인트(정차역 도착 -10/-4분) 직전에 재배포하면
+그 한 번은 놓칠 수 있다.** 그래서 배포 직전에 서버 DB를 보고 **10분 안에 폴이 잡힌 활성 구독이
+있으면 멈춘다.** 시각을 하드코딩하지 않으므로 구독이 없는 날은 아침에도 그냥 배포된다.
+
+멈췄을 때는 그 폴이 지난 뒤 Actions에서 **Re-run**하면 된다. 급하면 `workflow_dispatch`의
+`force`를 켠다 (그 폴 한 번을 포기한다는 뜻이다).
+
+지금 걸릴지 손으로 미리 볼 수 있다 — **읽기만 하므로 아무 때나 돌려도 안전하다**:
+
+```bash
+# M4 등에서. 종료 코드 0 = 배포해도 된다 / 1 = 보류
+ssh ubuntu@korail-matrix 'python3 - ~/itx-seat-matrix/data/itx.db' < scripts/deploy_guard.py
+
+# "내일 08:10이면 걸렸을까" — 예행 연습
+ssh ubuntu@korail-matrix 'python3 - --now 2026-08-11T08:10 ~/itx-seat-matrix/data/itx.db' \
+  < scripts/deploy_guard.py
+```
+
+<details>
+<summary>수동 배포 — 폴백 (러너가 죽었을 때·긴급)</summary>
+
+CD가 못 도는 상황에서도 배포 경로는 그대로 남아 있다. **`main`을 기준으로** 빌드한다.
 
 ```bash
 # M4: 빌드 + 전송
@@ -567,9 +686,9 @@ docker compose up -d --no-build
 ./scripts/deploy_check.sh
 ```
 
-출근 시간대 재배포도 안전하다 — `next_poll_at` 포인터가 DB에 있어 재시작을 흡수하고
-(D-19), 2분 이내 지각이면 즉시 실행, 넘으면 스킵하고 다음 포인트로 전진한다.
-**다만 폴 포인트(정차역 도착 -10/-4분) 직전에 재배포하면 그 한 번은 놓칠 수 있다.**
+손으로 할 때는 **롤백 포인터가 찍히지 않는다** — 아래 롤백 절의 `:previous`가 낡은 것을
+가리킬 수 있으니 `docker images itx-seat-matrix`로 눈으로 확인하고 되돌려라.
+</details>
 
 ### 로그
 
@@ -601,14 +720,32 @@ import sqlite3; s=sqlite3.connect('data/itx.db'); d=sqlite3.connect('data/backup
 
 ### 롤백
 
+**CD가 이미 한다.** 배포 후 `deploy_check.sh`가 실패하면 워크플로가 이미지와 작업 트리를
+**함께** 직전 상태로 되돌리고 재점검한 뒤 실패로 끝난다. 둘 중 하나만 되돌리면 옛 이미지가
+새 compose·새 스크립트로 뜨기 때문에 짝을 맞춘다.
+
+손으로 되돌릴 때도 같은 두 짝을 되돌린다 — CD가 매 배포마다 직전 이미지를 `:previous`로
+찍어 둔다:
+
 ```bash
-docker images itx-seat-matrix                 # 직전 이미지가 남아 있으면
-docker tag <이전IMAGE_ID> itx-seat-matrix:local
+cd ~/itx-seat-matrix
+docker tag itx-seat-matrix:previous itx-seat-matrix:local
+git reset --hard <직전커밋>                    # git log 로 확인. 이미지와 짝을 맞춘다
 docker compose up -d --no-build
+./scripts/deploy_check.sh
+```
+
+`:previous`가 없거나(첫 배포·수동 배포 뒤) 더 앞으로 가야 하면 이미지 목록에서 고른다.
+**`docker image prune`이 태그 없는 옛 이미지를 지우므로 두 세대 앞은 남아 있지 않을 수 있다:**
+
+```bash
+docker images itx-seat-matrix
+docker tag <이전IMAGE_ID> itx-seat-matrix:local
 ```
 
 DB 스키마 마이그레이션(`PRAGMA user_version`)은 되돌아가지 않는다. 스키마가 바뀐 배포를
-되돌릴 때는 백업 파일로 복구한다.
+되돌릴 때는 백업 파일로 복구한다. **CD의 자동 롤백도 여기까지는 못 한다** — 스키마를 바꾸는
+배포는 백업을 먼저 떠 두고 올려라.
 
 ### 멈추기 / 시작하기
 
@@ -711,3 +848,9 @@ docker compose logs app | grep "h_msg_cd"
   원본·사본 양쪽에서 돌린다 (4절). 오타 하나가 "기동은 되는데 코레일만 안 되는" 상태를 만든다
 - **`.env`·`*.db`를 커밋하지 마라.** pre-commit 훅이 막지만(D-33) 훅을 믿고 방심하지 마라
 - **실 코레일 API를 루프로 때리지 마라.** 디버깅은 `ADAPTER=mock`으로 (CLAUDE.md 10)
+- **CD가 서버의 `.env`를 건드리게 만들지 마라.** 자격증명은 손으로만 옮긴다 (4절, D-35).
+  워크플로에 `.env` 내용이 들어가는 순간 시크릿이 Actions 로그·아티팩트로 샐 경로가 생긴다
+- **`tag:ci`에 SSH 말고 다른 권한을 주지 마라.** 러너는 공개 인터넷에 있는 남의 기계다 —
+  ACL에서 열어준 것이 `korail-matrix:22` 하나여야 OAuth 시크릿이 새도 피해가 거기서 끝난다
+- **폴 포인트 가드를 "그냥 통과시키게" 고치지 마라.** 자꾸 걸리면 `--window-minutes`를
+  줄이는 것이지, 가드를 지우는 것이 아니다 (#22, D-51)
