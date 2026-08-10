@@ -193,6 +193,32 @@ else
   ng "$db 가 없다 — 개발 DB를 옮겼는지 확인해라 (DEPLOY.md '데이터 이관')"
 fi
 
+# 백업이 조용히 멈춘 것을 여기서 잡는다 (#60). 알림 종류는 5개로 고정이라 늘리지 않고
+# (PLAN 8절), 로그만 남기면 아무도 안 본다 — **배포마다 보는 이 화면**에 나이를 찍는다.
+#
+# ★ `!`(경고)이지 `✗`(치명)가 아니다. 낡은 백업 때문에 배포가 롤백되면 안 된다.
+#
+# 4일이 기준인 이유: 인스턴스가 주말에 자므로 금요일 백업 뒤 월요일까지 **정상적으로**
+# 3일이 벌어진다. 3일로 잡으면 월요일마다 거짓 경고가 뜨고, 그러면 진짜 신호를 무시하게 된다.
+stamp="/var/lib/itx-backup/last_success"
+if [ -f "$stamp" ]; then
+  last=$(cat "$stamp" 2>/dev/null | tr -d '\n')
+  # GNU date(우분투)면 나이를 계산한다. 맥에서 돌릴 때는 시각만 보여준다
+  last_epoch=$(date -d "$last" +%s 2>/dev/null || echo "")
+  if [ -n "$last_epoch" ]; then
+    age_days=$(( ( $(date +%s) - last_epoch ) / 86400 ))
+    if [ "$age_days" -le 4 ]; then
+      say "$OK" "마지막 백업 ${age_days}일 전 ($last)"
+    else
+      say "$WARN" "마지막 백업이 ${age_days}일 전이다 — journalctl -u itx-backup 를 봐라 (#60)"
+    fi
+  else
+    say "·" "마지막 백업: $last"
+  fi
+else
+  say "$WARN" "백업 기록이 없다 — 타이머를 설치했는지 확인해라 (DEPLOY.md 9절 '백업', #60)"
+fi
+
 # ── 7. 디스크 ────────────────────────────────────────────────────────
 hdr "디스크"
 df -h / | tail -1 | sed 's/^/  /'

@@ -1,0 +1,32 @@
+# DB 백업 → S3 (#60) — 설치 절차는 DEPLOY.md 9절 "백업".
+#
+# ★ `StateDirectory=itx-backup` 이 `/var/lib/itx-backup` 을 0755로 만들어 준다.
+#   여기에 마지막 성공 시각이 적히고, **`deploy_check.sh` 가 `ubuntu` 로 그것을 읽는다** —
+#   그래서 root 전용 경로(0700)에 두면 안 된다.
+#
+# ★ `EnvironmentFile` 은 저장소에 없다. 버킷 이름은 계정마다 다르므로 커밋하지 않는다.
+#   `/etc/itx-backup.env` 에 한 줄만 넣는다 (DEPLOY.md 9절):
+#
+#       ITX_BACKUP_S3_URI=s3://버킷이름/itx
+#
+#   시크릿은 아니지만 계정 식별자에 가까우므로 저장소 밖에 둔다. AWS 자격은 여기가 아니라
+#   **IAM 인스턴스 프로파일**에서 온다 — 디스크에 키가 없다.
+#
+# ★ `network-online.target` 을 기다린다. S3에 올려야 하므로 네트워크가 필요하고,
+#   부팅 직후 타이머가 겹칠 때 DNS가 아직 안 뜬 상태로 실패하는 것을 막는다.
+
+[Unit]
+Description=ITX 좌석 매트릭스 — DB 백업 → S3 (#60)
+Documentation=file:/home/ubuntu/itx-seat-matrix/DEPLOY.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+StateDirectory=itx-backup
+EnvironmentFile=/etc/itx-backup.env
+ExecStart=/usr/bin/python3 /home/ubuntu/itx-seat-matrix/scripts/backup_db.py /home/ubuntu/itx-seat-matrix/data/itx.db
+# 성공/실패 사유가 journal 에 남는다:
+#   journalctl -u itx-backup --since '7 days ago'
+StandardOutput=journal
+StandardError=journal
