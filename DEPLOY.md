@@ -753,8 +753,23 @@ python3 scripts/backup_db.py data/itx.db --no-upload
 | 버킷 버전 관리 | 끔 — 날짜별 키를 쓰므로 불필요하다 |
 | 기본 암호화 | SSE-S3 (기본값 유지) |
 
-**수명 주기 규칙**을 하나 만든다: 접두사 `itx/`, **30일 후 만료**.
+**수명 주기 규칙**을 하나 만든다: 접두사 `korail/`, **30일 후 만료**.
 2MB × 30일 = 60MB라 요금은 사실상 0이다. 규칙이 없으면 영원히 쌓인다.
+
+> **★ 접두사가 세 곳에 나온다 — 같아야 한다.** 문자열 자체는 임의지만(`korail`인 것에
+> 기술적 이유는 없다) 세 곳이 갈리면 조용히 틀린다:
+>
+> | 위치 | 값 | 어긋나면 |
+> |---|---|---|
+> | 수명 주기 규칙 접두사 | `korail/` | **영원히 쌓인다** — 아무 증상이 없어 요금서에만 나타난다 |
+> | IAM 정책 `Resource` (②) | `…/korail/*` | 백업 시각에 권한 거부. journal에 남아 알아채기 쉽다 |
+> | `ITX_BACKUP_S3_URI` (③) | `s3://버킷/korail` | 위 둘 중 하나에 걸려 실패한다 |
+>
+> **첫 줄이 가장 위험하다** — 나머지는 시끄럽게 실패하는데 이것만 조용하다.
+> 규칙을 만든 뒤 목록에서 범위에 `korail/`이 찍힌 것을 눈으로 확인해라.
+>
+> 코드는 접두사를 모른다 — 전부 `ITX_BACKUP_S3_URI`에서 오고 `backup_db.py`는 파일명만
+> 만든다. 그래서 전체 키는 `korail/itx-2026-08-10.db`가 된다 (파일명의 `itx-`는 그대로다).
 
 #### ② IAM 인스턴스 프로파일 (콘솔, 1회)
 
@@ -770,7 +785,7 @@ IAM → 역할 → 역할 생성 → **AWS 서비스** → **EC2** → 인라인
     {
       "Effect": "Allow",
       "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::버킷이름/itx/*"
+      "Resource": "arn:aws:s3:::버킷이름/korail/*"
     }
   ]
 }
@@ -793,7 +808,7 @@ EC2 → 인스턴스 → `korail-matrix` → **작업 → 보안 → IAM 역할 
 sudo apt-get install -y awscli
 aws --version
 
-echo 'ITX_BACKUP_S3_URI=s3://버킷이름/itx' | sudo tee /etc/itx-backup.env
+echo 'ITX_BACKUP_S3_URI=s3://버킷이름/korail' | sudo tee /etc/itx-backup.env
 sudo chmod 600 /etc/itx-backup.env
 
 cd ~/itx-seat-matrix
@@ -819,8 +834,8 @@ systemctl list-timers 'itx-*'                  # 백업 23:40 / 정지 23:50 순
 
 ```bash
 # 로컬(M4)에서 받는다 — 박스에는 GetObject 권한이 없다
-aws s3 ls s3://버킷이름/itx/
-aws s3 cp s3://버킷이름/itx/itx-2026-08-10.db ~/itx-restore.db
+aws s3 ls s3://버킷이름/korail/
+aws s3 cp s3://버킷이름/korail/itx-2026-08-10.db ~/itx-restore.db
 
 # 내용 확인 — user/station 이 0이면 그 백업은 쓰면 안 된다
 sqlite3 ~/itx-restore.db "select 'user',count(*) from user union all
