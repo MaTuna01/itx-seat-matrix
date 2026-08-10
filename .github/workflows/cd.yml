@@ -100,7 +100,9 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           host=$(tailscale ip -4 "$TS_HOST" 2>/dev/null || sudo tailscale ip -4 "$TS_HOST")
-          [ -n "$host" ] || { echo "::error::$TS_HOST 를 tailnet에서 찾지 못했다"; exit 1; }
+          # 가장 흔한 원인은 **인스턴스가 자고 있는 것**이다 (평일 06:00~24:00만 가동, D-54).
+          # 사유를 여기 적어둔다 — 실패를 보는 사람이 이 줄만 읽고 판단할 수 있어야 한다
+          [ -n "$host" ] || { echo "::error::$TS_HOST 를 tailnet에서 찾지 못했다. 가동 시간대(평일 06:00~24:00 KST) 밖이면 인스턴스가 자고 있다 — 다음 기동 뒤 Re-run 하거나, 콘솔에서 인스턴스를 시작한 뒤 Re-run 해라 (D-54)"; exit 1; }
           echo "HOST=$host" >> "$GITHUB_ENV"
           echo "대상: $TS_HOST ($host)"
 
