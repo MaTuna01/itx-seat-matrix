@@ -1,0 +1,26 @@
+# 조건부 자동 정지 (#58) — 설치 절차는 DEPLOY.md 9절 "자동 정지·기동".
+#
+# 이 유닛은 **끌지 말지를 스스로 정하지 않는다.** `shutdown_guard.py`가 DB를 보고
+# 종료 코드로 답하고, 여기서는 그 답을 실행만 한다.
+#
+# ★ `if … then … fi` 를 쓰는 이유. `guard && poweroff` 로 쓰면 가드가 1(켜둔다)을
+#   돌려줄 때 sh 도 1로 끝나 **systemd 가 이 유닛을 failed 로 표시한다.** 정지를
+#   보류하는 것은 정상 동작이므로 실패가 아니다. failed 가 매일 밤 쌓이면 진짜 실패를
+#   못 알아본다.
+#
+# ★ `systemctl --no-block poweroff` 를 쓴다. `--no-block` 이 없으면 이 유닛이 종료되기를
+#   기다리는 shutdown 작업과, shutdown 을 기다리는 이 유닛이 서로를 막을 수 있다.
+
+[Unit]
+Description=ITX 좌석 매트릭스 — 조건부 자동 정지 (#58)
+Documentation=file:/home/ubuntu/itx-seat-matrix/DEPLOY.md
+# 네트워크가 필요하지 않다 — 로컬 SQLite 만 읽는다
+
+[Service]
+Type=oneshot
+# root 로 돈다. poweroff 에 필요하고, data/ 는 uid 1000 소유지만 root 는 읽을 수 있다
+ExecStart=/bin/sh -c 'if /usr/bin/python3 /home/ubuntu/itx-seat-matrix/scripts/shutdown_guard.py /home/ubuntu/itx-seat-matrix/data/itx.db; then /usr/bin/systemctl --no-block poweroff; fi'
+# 가드의 출력이 journal 에 남는다 — 왜 껐는지/왜 안 껐는지가 여기에 있다:
+#   journalctl -u itx-shutdown --since '7 days ago'
+StandardOutput=journal
+StandardError=journal
