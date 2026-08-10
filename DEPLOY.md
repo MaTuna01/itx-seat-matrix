@@ -19,7 +19,7 @@
 |---|---|---|
 | **M4 MacBook Air** (arm64) | **작업 거점 — 빌드와 나머지 전부** | t4g는 Graviton(arm64). Apple Silicon에서 빌드하면 네이티브 arm64가 나온다 |
 | **Intel iMac** (x86_64) | **`data/itx.db` 원본 제공 — 이것만** | 실 코레일 자격증명과 푸시 기기 등록이 이 DB에만 있다 |
-| **EC2 t4g.nano** (Ubuntu 24.04 LTS, arm64) | 실행 | 24시간 깨어 있어야 30초 틱이 멈추지 않는다 (Phase 3이 열린 채로 남은 이유). SSH 사용자는 `ubuntu` (D-42) |
+| **EC2 t4g.nano** (Ubuntu 26.04 LTS, arm64) | 실행 | 통근 시간대에 깨어 있어야 30초 틱이 멈추지 않는다 — **평일 06:00~24:00만 가동한다** (9절 "자동 정지·기동", → D-54). SSH 사용자는 `ubuntu` (D-42) |
 
 **작업은 M4에서 하고, 아이맥 앞에는 5절(DB 이관) 때 한 번만 앉는다.** 저장소는 M4에서 새로
 clone하고, `.env`는 아이맥에서 긁어오지 않고 **별도 보관본(노션 등)에서 손으로 만든다**(4절) —
@@ -48,7 +48,7 @@ EC2 → **인스턴스 시작**:
 | 항목 | 값 | 주의 |
 |---|---|---|
 | 이름 | `korail-matrix` | tailnet 호스트명과 같게 두면 헷갈리지 않는다 |
-| AMI | **Ubuntu Server 24.04 LTS — arm64** (Canonical) | ★ x86_64 AMI를 고르면 t4g에서 시작조차 안 된다. AMI 목록에서 아키텍처를 **arm64로 먼저 전환**하고 골라라. 기본 SSH 사용자는 `ubuntu`다 (`ec2-user`가 아니다) |
+| AMI | **Ubuntu Server LTS — arm64** (Canonical) | ★ x86_64 AMI를 고르면 t4g에서 시작조차 안 된다. AMI 목록에서 아키텍처를 **arm64로 먼저 전환**하고 골라라. 기본 SSH 사용자는 `ubuntu`다 (`ec2-user`가 아니다). **버전은 콘솔 기본값(현재 26.04 `resolute`)을 그대로 쓴다** — 24.04로 맞출 이유가 없다 (→ D-42) |
 | 인스턴스 유형 | **t4g.nano** | |
 | 키 페어 | 새로 만들어 받아둔다 (`itx.pem`) | Tailscale이 붙기 전 첫 접속용. 붙은 뒤에는 안 쓰지만 **잠겼을 때의 유일한 탈출구**라 만들어 둔다 |
 | 네트워크 | 기본 VPC / 퍼블릭 IP 자동 할당 **켜기** | 아웃바운드로 Tailscale·코레일에 나가야 한다. 탄력적 IP는 **붙이지 않는다** (12절) |
@@ -93,6 +93,16 @@ free -h                                                      # Swap 2.0Gi 확인
 
 우분투 자체 패키지(`docker.io`)에는 compose 플러그인이 따라오지 않는다. 공식 저장소를 쓰면
 `docker-compose-plugin`이 함께 오므로 **바이너리를 손으로 내려받는 단계가 없다.**
+
+> **`Could not get lock /var/lib/dpkg/lock-frontend` 이 나오면 기다려라.** 갓 만든
+> 인스턴스는 부팅 직후 `unattended-upgrades`가 도는 중이라 apt가 두 개 동시에 못 돈다
+> (D-42가 예고한 그 자동 갱신이다). 잠금 파일을 지우지 말고 끝날 때까지 기다린 뒤 **실패한
+> 명령만** 다시 치면 된다 — 저장소 등록은 이미 끝나 있으므로 설치 스크립트를 처음부터
+> 다시 돌릴 필요는 없다:
+>
+> ```bash
+> while pgrep -x unattended-upgr >/dev/null; do echo "대기 중..."; sleep 5; done
+> ```
 
 ```bash
 sudo apt-get update
