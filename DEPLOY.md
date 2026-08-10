@@ -754,7 +754,7 @@ python3 scripts/backup_db.py data/itx.db --no-upload
 | 기본 암호화 | SSE-S3 (기본값 유지) |
 
 **수명 주기 규칙**을 하나 만든다: 접두사 `korail/`, **30일 후 만료**.
-2MB × 30일 = 60MB라 요금은 사실상 0이다. 규칙이 없으면 영원히 쌓인다.
+DB가 3MB대라 30일치가 100MB 안팎이다 — 요금은 사실상 0이다. 규칙이 없으면 영원히 쌓인다.
 
 > **★ 접두사가 세 곳에 나온다 — 같아야 한다.** 문자열 자체는 임의지만(`korail`인 것에
 > 기술적 이유는 없다) 세 곳이 갈리면 조용히 틀린다:
@@ -793,9 +793,32 @@ IAM → 역할 → 역할 생성 → **AWS 서비스** → **EC2** → 인라인
 
 역할 이름 `itx-backup-writer`. **`s3:GetObject`도 `ListBucket`도 넣지 않는다** — 복원은
 사람이 콘솔이나 로컬에서 하고, 박스가 남의 백업을 읽을 이유가 없다.
+(그래서 박스에서 `aws s3 ls`는 **의도적으로** 안 된다. 고장이 아니다.)
+
+> **★ 역할만 만들고 끝내기 쉽다.** "AWS 서비스 → EC2"로 역할을 만들 때 권한 추가 화면에서
+> 아무것도 고르지 않고 넘어가는데(인라인으로 붙일 것이므로), 거기서 **역할 생성까지 눌러버리면
+> 권한이 0인 역할**이 된다. 연결도 되고 `assumed-role`도 잡히지만 백업 시각에 이렇게 죽는다:
+>
+> ```
+> An error occurred (AccessDenied) when calling the PutObject operation:
+> ... is not authorized to perform: s3:PutObject ... because no identity-based policy allows
+> ```
+>
+> `no identity-based policy allows`가 그 신호다 — 정책이 **없다**는 뜻이지 잘못됐다는 뜻이
+> 아니다. 역할 → **권한** 탭에서 정책 목록이 비어 있는지 먼저 봐라. (실제로 이 순서로 한 번 겪었다.)
 
 EC2 → 인스턴스 → `korail-matrix` → **작업 → 보안 → IAM 역할 수정** → 이 역할 연결.
 **재부팅이 필요 없다.**
+
+연결됐는지는 박스에서 바로 확인된다. `sts:GetCallerIdentity`는 **권한이 필요 없는 호출**이라
+정책과 무관하게 "자격이 흘러오는가"만 순수하게 본다:
+
+```bash
+aws sts get-caller-identity     # Arn 에 assumed-role/<역할이름>/i-... 가 보이면 연결됨
+```
+
+`Unable to locate credentials`면 역할 연결이 안 된 것이고, `command not found`면 ③의
+`awscli` 설치가 먼저다.
 
 > D-42가 "IAM 인스턴스 프로파일을 붙이지 않아 SSM은 쓸 수 없다"고 적었는데, 이제 붙는다.
 > 다만 이 역할에 SSM 권한은 없으므로 **SSM은 여전히 안 된다** — 잠겼을 때의 탈출구는
@@ -828,37 +851,102 @@ systemctl list-timers 'itx-*'                  # 백업 23:40 / 정지 23:50 순
 `list-timers`에서 **백업이 정지보다 앞**인지 눈으로 확인해라. 뒤집히면 백업이 한 번도
 실행되지 않는다.
 
-#### ④ 복원 — **해본 적 없으면 백업이 아니다**
+#### ④ 복원 리허설 — **해본 적 없으면 백업이 아니다**
 
-한 번은 실제로 해봐라. 지금 안 해보면 필요할 때 처음 해보게 된다.
+세 부분으로 나눈다. **1·2부는 살아 있는 DB를 전혀 건드리지 않고** "이 백업이 쓸 수 있는
+것인가"를 증명하고, 3부는 "절차가 맞는가"를 증명한다. **1·2부만으로도 리허설로 인정한다.**
+
+> 맥의 `data/itx.db`(개발 DB)를 덮어쓰지 않도록 아래 경로를 그대로 써라. 계정이 들어 있고
+> 가입이 잠겨 있어 복구가 번거롭다 (D-24).
+
+**1부 — 받아서 무결성 확인 (맥)**
+
+`aws` CLI가 없으면 **S3 콘솔에서 직접 다운로드**해라. 일회성 리허설에 CLI를 깔고 액세스 키를
+발급하면 **장기 자격증명이 노트북에 남는다** — 그럴 값이 없다.
+(콘솔: S3 → 버킷 → `korail/` → 객체 선택 → 다운로드)
 
 ```bash
-# 로컬(M4)에서 받는다 — 박스에는 GetObject 권한이 없다
-aws s3 ls s3://버킷이름/korail/
-aws s3 cp s3://버킷이름/korail/itx-2026-08-10.db ~/itx-restore.db
+cd ~/Downloads
+ls itx-2026-08-10.db-wal 2>/dev/null && echo "★ -wal 이 있으면 파일 복사로 뜬 것이다 (D-41)"
 
-# 내용 확인 — user/station 이 0이면 그 백업은 쓰면 안 된다
-sqlite3 ~/itx-restore.db "select 'user',count(*) from user union all
+sqlite3 itx-2026-08-10.db "PRAGMA integrity_check;"      # ok
+sqlite3 itx-2026-08-10.db "select 'user',count(*) from user union all
+  select 'subscription',count(*) from subscription union all
   select 'station',count(*) from station union all
+  select 'train_stop',count(*) from train_stop union all
   select 'push_device',count(*) from push_device;"
 ```
 
-박스에 되돌릴 때:
+행 수가 `journalctl -u itx-backup`에 찍힌 값과 같아야 한다. `.backup`은 WAL을 흡수한
+**단일 일관 파일**을 만들므로 `-wal`이 딸려 있으면 안 된다.
+
+**2부 — 복호화 검증 (박스, 앱 무중단) ★ 여기가 진짜다**
+
+파일이 멀쩡한 것과 **쓸 수 있는 것**은 다르다. `korail_pw_enc`가 현재 `SECRET_KEY`로 풀리지
+않으면 그 백업으로는 코레일 조회가 안 되고, 증상은 `FETCH_FAILED` 1회와 "연결됨" 꺼짐뿐이라
+알아채기 어렵다 (D-35). `SECRET_KEY`는 박스에만 있으니 검증도 박스에서 한다.
 
 ```bash
-# EC2. ★ 앱을 먼저 내린다 — 뜬 상태로 갈아치우면 WAL과 어긋난다
+# 맥 → 박스. **별도 파일명으로** 보낸다 (itx.db 를 덮지 않는다)
+scp ~/Downloads/itx-2026-08-10.db ubuntu@korail-matrix:~/itx-seat-matrix/data/restore-test.db
+```
+
+```bash
+# 박스. 앱이 폴링할 때 부르는 그 함수로 복호화를 시도한다
+cd ~/itx-seat-matrix
+docker compose exec -T app python - <<'PY'
+import sqlite3
+from app.storage.creds import load_korail_cred
+c = sqlite3.connect("data/restore-test.db")
+c.row_factory = sqlite3.Row
+for (uid,) in c.execute("select id from user"):
+    # ★ 비밀번호 자체는 절대 찍지 않는다 — 성공/실패만 본다
+    print(f"user {uid}: 복호화 {'성공' if load_korail_cred(c, uid) is not None else '실패'}")
+c.close()
+PY
+
+rm -f data/restore-test.db      # 사본을 볼륨에 남기지 않는다
+```
+
+`load_korail_cred`는 복호화 실패 시 `None`을 돌려주므로, `성공`이 나오면 **이 백업으로 실제
+복원이 가능하다는 증명**이다.
+
+**3부 — 실제 교체까지 (선택)**
+
+절차를 검증한다. 먼저 **대가를 없애라** — 옛 백업으로 되돌리면 그 이후 변경이 사라지므로,
+리허설 직전에 새로 뜨면 잃을 것이 없다. 앱을 내리는 일이니 폴 포인트도 확인한다:
+
+```bash
+# 박스
+sudo systemctl start itx-backup.service                    # 같은 날짜 키를 덮어쓴다
+python3 scripts/deploy_guard.py data/itx.db && echo "지금 해도 된다"
+```
+
+그 백업을 다시 받아 교체한다:
+
+```bash
+# 박스. ★ 앱을 먼저 내린다 — 뜬 상태로 갈아치우면 WAL과 어긋난다
 cd ~/itx-seat-matrix
 docker compose down
-mv data/itx.db data/itx.db.bad          # 지우지 말고 옆으로 치운다
+mv data/itx.db data/itx.db.bad          # 지우지 말고 옆으로 — 유일한 되돌림이다
 rm -f data/itx.db-wal data/itx.db-shm   # ★ 옛 WAL이 남으면 새 DB에 섞인다
-# (M4에서 scp ~/itx-restore.db ubuntu@korail-matrix:~/itx-seat-matrix/data/itx.db)
+# (맥에서 scp ~/Downloads/itx-2026-08-10.db ubuntu@korail-matrix:~/itx-seat-matrix/data/itx.db)
 sudo chown 1000:1000 data/itx.db
 docker compose up -d
 ./scripts/deploy_check.sh
 ```
 
-확인: 로그인되고 → 설정 화면에서 코레일 **"연결됨"** (`SECRET_KEY`가 그 백업과 짝이 맞다는
-증거) → 역 드롭다운에 역이 나온다. 여기까지 되면 복원이 성공한 것이다.
+확인: 로그인된다 → 설정에서 코레일 **"연결됨"**(`SECRET_KEY` 일치의 최종 증거) → 역 드롭다운에
+역이 나온다 → 열차 검색이 매트릭스를 그린다. 전부 통과하면 `rm -P data/itx.db.bad`.
+
+하나라도 실패하면 되돌린다:
+
+```bash
+docker compose down
+mv data/itx.db.bad data/itx.db
+rm -f data/itx.db-wal data/itx.db-shm
+docker compose up -d
+```
 
 > **`SECRET_KEY`를 바꾼 뒤의 백업은 그 전 백업과 호환되지 않는다** — `korail_pw_enc`가
 > 풀리지 않는다 (D-35). 키를 바꿀 일이 생기면 그 시점 이전 백업은 계정 재등록이 필요하다.
