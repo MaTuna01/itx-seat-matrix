@@ -1,0 +1,34 @@
+# 조건부 자동 정지 타이머 (#58) — 설치 절차는 DEPLOY.md 9절 "자동 정지·기동".
+#
+# ★★ `Persistent=false` 가 이 파일에서 가장 중요한 한 줄이다.
+#
+#     `Persistent=true` 면 systemd 가 **꺼져 있는 동안 놓친 실행을 부팅 직후에 몰아서
+#     친다.** 이 인스턴스는 매일 밤 꺼지므로 놓친 실행이 늘 존재하고, 그러면 월요일
+#     06:00 에 기동하자마자 정지 유닛이 돌아 **켜지자마자 다시 꺼진다.**
+#     하필 출근길 아침에, 아무 로그도 남기지 않고.
+#
+# ★ 타임존을 캘린더 식에 직접 적는다. 호스트 타임존(Asia/Seoul)에 기대지 않기 위해서다 —
+#   누가 `timedatectl set-timezone UTC` 를 하면 9시간이 조용히 어긋난다.
+#   systemd 252+ 가 이 문법을 지원한다. 켜기 전에 반드시 확인해라:
+#
+#       systemd-analyze calendar 'Mon-Fri 23:50 Asia/Seoul'
+#
+#   파싱에 실패하면 systemd 가 오래된 것이다 — 그때는 호스트 타임존을 KST 로 맞추고
+#   `OnCalendar=Mon-Fri 23:50` 으로 적어라.
+#
+# 23:50 인 이유: 가동 시간대가 평일 06:00~24:00 이다. 자정 직전에 한 번 물어본다.
+# 이 시각과 `shutdown_guard.START_TIME`, EventBridge 스케줄 셋이 한 세트다.
+
+[Unit]
+Description=평일 23:50 조건부 자동 정지 (#58)
+Documentation=file:/home/ubuntu/itx-seat-matrix/DEPLOY.md
+
+[Timer]
+OnCalendar=Mon-Fri 23:50 Asia/Seoul
+Persistent=false
+# 기본 1분 오차면 충분하다. 정확할 이유가 없고, 정확하면 그만큼 깨우기만 한다
+AccuracySec=1min
+Unit=itx-shutdown.service
+
+[Install]
+WantedBy=timers.target

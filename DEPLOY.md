@@ -754,6 +754,112 @@ docker compose stop      # 알림도 멈춘다
 docker compose start
 ```
 
+### 자동 정지·기동 — **미사용 시간대에 인스턴스를 끈다** (#58)
+
+평일 **06:00~24:00(KST)** 만 가동하고 주말은 완전히 정지한다. 월 ~$4.7 → ~$2.9.
+**EBS 10GB(~$0.91/월)는 꺼도 계속 나간다** — 줄어드는 것은 컴퓨트뿐이다.
+
+기동은 AWS(EventBridge Scheduler)가, **정지 판단은 박스 안에서** 한다. 시각만 보고 끄면
+안 되기 때문이다 — 꺼져 있는 동안 도래한 폴 포인트는 `resolve_poll`의 grace 2분을 넘겨
+**스킵되고 포인터만 전진한다**(D-19). 운행이 통째로 지나갔으면 `is_ride_over`가 구독을
+만료시킨다. 남는 것은 로그 한 줄이고 알림은 오지 않는다.
+
+그래서 `deploy_guard.py`와 같은 패턴을 쓴다 (D-51): **다음 기동 시각 전에 폴이 잡혀
+있으면 끄지 않는다.** 주말은 이 계산에 자연히 들어간다 — 금요일 밤의 "다음 기동"은
+월요일 06:00이므로, 토요일 열차 구독이 있으면 금요일 밤부터 정지를 거부한다.
+
+> **판단 불능일 때 `deploy_guard.py`와 방향이 반대다.** 배포 가드는 모르면 통과시키고,
+> 정지 가드는 모르면 **켜둔다.** 하룻밤 $0.09 대 출근길 알림 전체라 어느 쪽이 싼지가
+> 분명하다. 다만 이 방향의 고장은 **요금서에만 나타나므로** 첫 주에 한 번 로그를 봐라.
+
+#### ★ 먼저 확인 — 인스턴스 시작 종료 동작이 `stop`인가
+
+이걸 안 보고 진행하면 **박스가 사라진다.** OS가 poweroff를 걸었을 때 EC2가 인스턴스를
+정지시킬지 종료시킬지는 인스턴스 속성이 정한다. 기본값은 `stop`이지만 확인은 공짜다.
+
+EC2 콘솔 → 인스턴스 선택 → **작업 → 인스턴스 설정 → 종료 동작 변경**(Change shutdown
+behavior) → **`중지(Stop)`** 인지 확인.
+
+> 9단계에서 껐던 **종료 방지(termination protection)는 이걸 막아주지 않는다.**
+> 그건 API 호출만 막고 OS가 건 종료에는 관여하지 않는다.
+
+#### ① 기동 — EventBridge Scheduler (콘솔, 소유자가 직접)
+
+리전 **ap-northeast-2**. EventBridge → 스케줄러 → **일정 생성**:
+
+| 항목 | 값 |
+|---|---|
+| 이름 | `itx-start-weekday` |
+| 일정 패턴 | 되풀이 / cron 기반 |
+| cron 식 | `cron(0 6 ? * MON-FRI *)` |
+| 시간대 | **`Asia/Seoul`** ← UTC로 환산하지 마라. 서머타임이 없어도 손으로 환산하면 틀린다 |
+| 유연한 기간 | **끄기(Off)** ← 켜면 최대 15분 늦게 시작해 첫 폴을 놓칠 수 있다 |
+| 대상 | 템플릿이 지정된 대상 → **EC2 `StartInstances`** |
+| 입력 | `{"InstanceIds": ["i-<서울 인스턴스 ID>"]}` |
+| 권한 | 새 역할 생성 (콘솔이 `ec2:StartInstances`만 붙여준다) |
+
+Lambda는 필요 없다. 호출이 월 22회라 요금도 사실상 0이다.
+
+#### ② 정지 — systemd 타이머 (박스에서)
+
+```bash
+# EC2. 저장소에 유닛이 들어 있다 (scripts/systemd/)
+cd ~/itx-seat-matrix
+
+# 캘린더 식이 이 systemd 에서 파싱되는지 먼저 본다
+systemd-analyze calendar 'Mon-Fri 23:50 Asia/Seoul'
+
+# 가드를 예행 연습한다 — 읽기만 하므로 아무 때나 안전하다
+python3 scripts/shutdown_guard.py data/itx.db
+python3 scripts/shutdown_guard.py data/itx.db --now 2026-08-14T23:50   # 금요일 밤이면?
+
+sudo cp scripts/systemd/itx-shutdown.service scripts/systemd/itx-shutdown.timer \
+        /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now itx-shutdown.timer
+
+systemctl list-timers itx-shutdown.timer    # NEXT 가 다음 평일 23:50 인지 확인
+```
+
+호스트 타임존도 KST로 맞춰두면 `journalctl`·`docker compose logs`가 읽기 편해진다
+(도메인이 전부 KST다). 타이머는 캘린더 식에 타임존을 직접 적으므로 여기에 의존하지 않는다:
+
+```bash
+sudo timedatectl set-timezone Asia/Seoul
+```
+
+> `deploy_check.sh`는 `docker logs --since`(상대시각)와 docker API의 UTC 타임스탬프만
+> 쓰므로 타임존 변경에 영향받지 않는다 — 확인했다.
+
+#### ③ 첫 주 확인
+
+```bash
+journalctl -u itx-shutdown --since '7 days ago'
+```
+
+`정지 가능:` / `정지 보류:` 중 하나가 매일 밤 한 줄씩 남는다. **`정지 보류:`만 계속
+나온다면 절감이 0이라는 뜻이다** — 사유가 같은 줄에 찍혀 있다.
+
+#### 끄고 싶을 때 (되돌리기)
+
+```bash
+sudo systemctl disable --now itx-shutdown.timer
+```
+
+기동 쪽은 EventBridge 콘솔에서 일정을 **비활성화**한다. 둘은 독립이라 한쪽만 꺼도 된다 —
+다만 **정지만 남기면 아침에 안 켜진다.** 되돌릴 때는 정지부터 꺼라.
+
+#### 손으로 켜야 할 때
+
+주말이나 새벽에 예외적으로 타야 하면 AWS 콘솔(모바일 앱 포함)에서 인스턴스를 시작한다.
+1~2분 뒤 `restart: unless-stopped`가 컨테이너를 되살리고 Tailscale도 자동으로 붙는다.
+**퍼블릭 IP는 켤 때마다 바뀌지만** tailnet 주소로만 접근하므로 상관없다.
+
+> **가동 시간대를 바꾸려면 세 곳을 함께 바꿔야 한다** — EventBridge cron 식,
+> `scripts/shutdown_guard.py`의 `START_TIME`, `itx-shutdown.timer`의 `OnCalendar`.
+> 한쪽만 바꾸면 조용히 틀린다: 기동을 07:00으로 늦췄는데 가드가 06:00을 믿으면,
+> 06:10 폴을 "기동 후"로 오판해 전날 밤에 인스턴스를 꺼버린다.
+
 ---
 
 ## 10. Phase 3 완료 기준 검증 — 실제 출근길 한 번
