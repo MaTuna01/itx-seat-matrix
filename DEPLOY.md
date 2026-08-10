@@ -726,16 +726,127 @@ docker compose logs --since 30m app           # 최근 30분
 docker compose exec app python scripts/load_train_stops.py
 ```
 
-### 백업 — **계정과 코레일 자격증명이 들어 있다**
+### 백업 — **계정과 코레일 자격증명이 들어 있다** (#60)
+
+매일 23:40에 `itx-backup.timer`가 `.backup` 스냅샷을 떠 **S3에 올린다.** 하루 1개,
+수명 주기 정책으로 30일 뒤 삭제. 손으로 뜰 때는:
 
 ```bash
-# EC2에서. WAL 포함 일관 스냅샷
-docker compose exec app python -c "
-import sqlite3; s=sqlite3.connect('data/itx.db'); d=sqlite3.connect('data/backup.db'); s.backup(d)"
+# EC2. 검증만 하고 올리지 않는다 — 아무 때나 안전하다
+python3 scripts/backup_db.py data/itx.db --no-upload
 ```
 
 암호는 Fernet으로 암호화돼 있지만 `SECRET_KEY`와 함께 새면 의미가 없다.
-**백업 파일과 `.env`를 같은 곳에 두지 마라** (12절).
+**백업과 `.env`를 같은 곳에 두지 마라** (12절).
+
+> **`data/` 안에 백업을 만들지 마라.** 볼륨과 함께 죽어서 백업이라 부를 수 없고,
+> 10GB EBS를 갉아먹는다. 이 스크립트는 `/tmp`에 0600으로 만들고 올린 뒤 지운다.
+
+#### ① S3 버킷 (콘솔, 1회)
+
+리전 **ap-northeast-2**. S3 → 버킷 만들기:
+
+| 항목 | 값 |
+|---|---|
+| 이름 | 계정 전역 고유해야 한다 (예: `itx-backup-<임의문자>`) |
+| 퍼블릭 액세스 차단 | **모두 차단** (기본값 유지) |
+| 버킷 버전 관리 | 끔 — 날짜별 키를 쓰므로 불필요하다 |
+| 기본 암호화 | SSE-S3 (기본값 유지) |
+
+**수명 주기 규칙**을 하나 만든다: 접두사 `itx/`, **30일 후 만료**.
+2MB × 30일 = 60MB라 요금은 사실상 0이다. 규칙이 없으면 영원히 쌓인다.
+
+#### ② IAM 인스턴스 프로파일 (콘솔, 1회)
+
+★ **박스에 AWS 자격이 처음 생기는 지점이다.** 그래서 좁힌다 — 이 버킷의 이 접두사에
+**쓰기만** 허용한다. 유출돼도 피해가 "여기에 파일을 쓸 수 있다"로 끝난다.
+
+IAM → 역할 → 역할 생성 → **AWS 서비스** → **EC2** → 인라인 정책:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::버킷이름/itx/*"
+    }
+  ]
+}
+```
+
+역할 이름 `itx-backup-writer`. **`s3:GetObject`도 `ListBucket`도 넣지 않는다** — 복원은
+사람이 콘솔이나 로컬에서 하고, 박스가 남의 백업을 읽을 이유가 없다.
+
+EC2 → 인스턴스 → `korail-matrix` → **작업 → 보안 → IAM 역할 수정** → 이 역할 연결.
+**재부팅이 필요 없다.**
+
+> D-42가 "IAM 인스턴스 프로파일을 붙이지 않아 SSM은 쓸 수 없다"고 적었는데, 이제 붙는다.
+> 다만 이 역할에 SSM 권한은 없으므로 **SSM은 여전히 안 된다** — 잠겼을 때의 탈출구는
+> 그대로 키 페어다 (1절).
+
+#### ③ 박스 설치
+
+```bash
+# EC2
+sudo apt-get install -y awscli
+aws --version
+
+echo 'ITX_BACKUP_S3_URI=s3://버킷이름/itx' | sudo tee /etc/itx-backup.env
+sudo chmod 600 /etc/itx-backup.env
+
+cd ~/itx-seat-matrix
+systemd-analyze calendar '*-*-* 23:40 Asia/Seoul'
+
+# 손으로 한 번 끝까지 돌려본다 — 여기서 실패하면 타이머로도 실패한다
+sudo systemctl daemon-reload
+sudo cp scripts/systemd/itx-backup.service scripts/systemd/itx-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start itx-backup.service        # 실제로 올린다
+journalctl -u itx-backup -n 20 --no-pager      # "백업 성공: itx-....db"
+
+sudo systemctl enable --now itx-backup.timer
+systemctl list-timers 'itx-*'                  # 백업 23:40 / 정지 23:50 순서 확인
+```
+
+`list-timers`에서 **백업이 정지보다 앞**인지 눈으로 확인해라. 뒤집히면 백업이 한 번도
+실행되지 않는다.
+
+#### ④ 복원 — **해본 적 없으면 백업이 아니다**
+
+한 번은 실제로 해봐라. 지금 안 해보면 필요할 때 처음 해보게 된다.
+
+```bash
+# 로컬(M4)에서 받는다 — 박스에는 GetObject 권한이 없다
+aws s3 ls s3://버킷이름/itx/
+aws s3 cp s3://버킷이름/itx/itx-2026-08-10.db ~/itx-restore.db
+
+# 내용 확인 — user/station 이 0이면 그 백업은 쓰면 안 된다
+sqlite3 ~/itx-restore.db "select 'user',count(*) from user union all
+  select 'station',count(*) from station union all
+  select 'push_device',count(*) from push_device;"
+```
+
+박스에 되돌릴 때:
+
+```bash
+# EC2. ★ 앱을 먼저 내린다 — 뜬 상태로 갈아치우면 WAL과 어긋난다
+cd ~/itx-seat-matrix
+docker compose down
+mv data/itx.db data/itx.db.bad          # 지우지 말고 옆으로 치운다
+rm -f data/itx.db-wal data/itx.db-shm   # ★ 옛 WAL이 남으면 새 DB에 섞인다
+# (M4에서 scp ~/itx-restore.db ubuntu@korail-matrix:~/itx-seat-matrix/data/itx.db)
+sudo chown 1000:1000 data/itx.db
+docker compose up -d
+./scripts/deploy_check.sh
+```
+
+확인: 로그인되고 → 설정 화면에서 코레일 **"연결됨"** (`SECRET_KEY`가 그 백업과 짝이 맞다는
+증거) → 역 드롭다운에 역이 나온다. 여기까지 되면 복원이 성공한 것이다.
+
+> **`SECRET_KEY`를 바꾼 뒤의 백업은 그 전 백업과 호환되지 않는다** — `korail_pw_enc`가
+> 풀리지 않는다 (D-35). 키를 바꿀 일이 생기면 그 시점 이전 백업은 계정 재등록이 필요하다.
 
 ### 롤백
 
