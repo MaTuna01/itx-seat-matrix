@@ -1,0 +1,28 @@
+# DB 백업 타이머 (#60) — 설치 절차는 DEPLOY.md 9절 "백업".
+#
+# ★ 23:40 이다 — 정지 가드(23:50)보다 **10분 앞**. 순서가 뒤집히면 백업이 한 번도
+#   실행되지 않는다. 2MB 업로드는 몇 초면 끝나므로 10분은 넉넉하다.
+#
+# ★★ 흔한 오답: "새벽 3시 백업". **인스턴스가 평일 06:00~24:00 만 깨어 있으므로**
+#     새벽에 잡은 타이머는 영영 실행되지 않는다 (D-54). 그리고 `Persistent=true` 로
+#     때우려 하면 부팅 직후 몰아치기가 생겨 아침 기동과 겹친다 — D-54가 정지 타이머에서
+#     `false` 를 쓰는 것과 같은 이유다.
+#
+# ★ 평일이 아니라 **매일**이다. 주말 열차 구독 때문에 정지 가드가 인스턴스를 켜둔 날에도
+#   백업이 돈다 — 깨어 있으면 뜨고, 자고 있으면 아무 일도 없다. `Mon-Fri` 로 좁힐 이유가 없다.
+#
+# 켜기 전에 확인:
+#     systemd-analyze calendar '*-*-* 23:40 Asia/Seoul'
+
+[Unit]
+Description=매일 23:40 DB 백업 (#60)
+Documentation=file:/home/ubuntu/itx-seat-matrix/DEPLOY.md
+
+[Timer]
+OnCalendar=*-*-* 23:40 Asia/Seoul
+Persistent=false
+AccuracySec=1min
+Unit=itx-backup.service
+
+[Install]
+WantedBy=timers.target
