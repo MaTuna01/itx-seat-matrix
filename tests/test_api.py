@@ -191,6 +191,17 @@ class TestSubscriptionTransition:
         )
         assert res.status_code == 422
 
+    def test_뒤집힌_구간으로는_구독을_만들_수_없다(self, client):
+        """구간 스왑(#67)의 서버측 안전장치 — 방향이 틀리면 422로 거부한다."""
+        res = client.post(
+            "/api/subscriptions",
+            json={
+                "train_no": "1004", "date": RIDE_DATE, "board_at": "서울",
+                "alight_at": "천안", "status": "STANDING",
+            },
+        )
+        assert res.status_code == 422
+
     def test_구독_생성시_첫_폴_포인트를_기록한다(self, client):
         sub = make_subscription(client)
         # 천안 08:00 - 10분 (D-19 재시작 내구성 포인터)
@@ -356,6 +367,14 @@ class TestMatrix:
             params={"date": RIDE_DATE, "board_at": "부산", "alight_at": "서울"},
         )
         assert res.status_code == 404
+
+    def test_뒤집힌_구간은_422(self, client):
+        """구간 스왑(#67)의 서버측 안전장치 — 같은 열차에서 방향이 반대면 조회를 거부한다."""
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "서울", "alight_at": "천안"},
+        )
+        assert res.status_code == 422
 
     def test_잘못된_좌석_형식은_422(self, client):
         res = client.get(
