@@ -17,14 +17,14 @@ from datetime import datetime, time as _time
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
 from app.adapters.delay_zero import ZeroDelayAdapter
 from app.adapters.korail2_adapter import CredentialsRequired, TrainStopsNotCached
 from app.adapters.korail_port import KorailPort
 from app.adapters.seatmap_fetcher import SCREEN_RETRY, fetch_matrix
+from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
 from app.auth.session import current_user
 from app.domain.geo import GeoFix, is_fix_usable, project_onto_route
-from app.domain.matrix import query_range
+from app.domain.matrix import query_range, route_indexes
 from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
 from app.domain.timeline import estimate_seg, next_poll_hint, sellable_seg_idx
 from app.domain.verdict import build_verdict
@@ -133,14 +133,13 @@ async def get_matrix(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="열차를 찾을 수 없습니다") from exc
     names = [s.name for s in stops]
-    if board_at not in names or alight_at not in names:
-        raise HTTPException(status_code=404, detail="노선에 없는 역입니다")
-    board_idx, alight_idx = names.index(board_at), names.index(alight_at)
-    if board_idx >= alight_idx:
-        raise HTTPException(
-            status_code=422,  # starlette 버전에 따라 상수명이 갈려 숫자로 고정
-            detail="탑승역이 하차역보다 뒤에 있습니다",
-        )
+    try:
+        board_idx, alight_idx = route_indexes(names, board_at, alight_at)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        # starlette 버전에 따라 상수명이 갈려 숫자로 고정
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     train_name = await port.get_train_name(train_no, date)
     delay_minutes = await delay_port.get_delay_minutes(train_no, date)

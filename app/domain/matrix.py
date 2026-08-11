@@ -25,6 +25,24 @@ def build_segments(stops: list[str]) -> list[Segment]:
     ]
 
 
+def route_indexes(names: list[str], board_at: str, alight_at: str) -> tuple[int, int]:
+    """노선 정차역 이름 목록에서 승차/하차 인덱스를 찾는다 (D-18: 인덱스는 전체 `stops` 기준).
+
+    방향(상·하행)이라는 개념은 도메인에 따로 없다 — "이 열차의 stops 안에서
+    승차가 하차보다 앞인가"가 방향의 전부다. 구간 스왑 UX가 기대는 안전장치이므로
+    api 두 곳(subscriptions/trains)이 이 함수 하나를 공유한다.
+
+    - 역이 노선에 없으면 LookupError (api는 404로 매핑)
+    - 승차가 하차보다 뒤거나 같은 역이면 ValueError (api는 422로 매핑)
+    """
+    if board_at not in names or alight_at not in names:
+        raise LookupError("노선에 없는 역입니다")
+    board_idx, alight_idx = names.index(board_at), names.index(alight_at)
+    if board_idx >= alight_idx:
+        raise ValueError("탑승역이 하차역보다 뒤에 있습니다")
+    return board_idx, alight_idx
+
+
 def effective_start_idx(sellable_seg_idx: int, board_idx: int) -> int:
     """실효 시작 = max(팔 수 있는 첫 구간, 탑승역) (D-18 인덱스 규칙, D-47).
 

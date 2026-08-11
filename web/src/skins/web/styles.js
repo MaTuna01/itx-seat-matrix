@@ -192,5 +192,13 @@ export const st = {
   segRow: { display: "flex", gap: 8 },
   // native date/time input은 min-width:auto라 flex로 줄지 않는다 → 겹침 방지
   segCol: { flex: 1, minWidth: 0 },
+  // 출발/도착역 스왑 (#67) — 피그마 web `Btn/Swap`(78:113). 라벨 줄을 건너뛰고
+  // 38px 입력칸의 세로 중앙에 오도록 행 바닥 기준으로 3px 띄운다
+  swapCol: { flex: "0 0 auto", alignSelf: "flex-end", marginBottom: 3 },
+  swapBtn: {
+    width: 32, height: 32, borderRadius: 16, border: "1.5px solid #d8dee9",
+    background: "#fff", color: "#1a3a6b", cursor: "pointer", padding: 0,
+    display: "flex", alignItems: "center", justifyContent: "center",
+  },
   toggleRow: { display: "flex", gap: 8, marginTop: 6 },
 };
