@@ -10,6 +10,7 @@ from app.domain.matrix import (
     effective_start_idx,
     merge_seat_maps,
     query_range,
+    route_indexes,
 )
 from app.domain.models import SeatMap, SeatState
 from tests.conftest import RIDE_DATE, STOPS, at
@@ -34,6 +35,26 @@ def test_정차역_N개는_인접_구간_N_1개가_된다():
     assert len(segments) == len(STOPS) - 1
     assert (segments[0].from_station, segments[0].to_station, segments[0].idx) == ("천안", "평택", 0)
     assert segments[-1].to_station == "서울"
+
+
+class TestRouteIndexes:
+    """구간 스왑(#67)의 안전장치 — subscriptions/trains 두 api가 공유하는 방향 검증."""
+
+    def test_정상_구간은_인덱스_쌍을_돌려준다(self):
+        assert route_indexes(STOPS, "천안", "서울") == (0, 5)
+        assert route_indexes(STOPS, "수원", "영등포") == (2, 4)
+
+    def test_노선에_없는_역은_LookupError(self):
+        with pytest.raises(LookupError):
+            route_indexes(STOPS, "부산", "서울")
+
+    def test_뒤집힌_구간은_ValueError(self):
+        with pytest.raises(ValueError):
+            route_indexes(STOPS, "서울", "천안")
+
+    def test_승차와_하차가_같은_역이면_ValueError(self):
+        with pytest.raises(ValueError):
+            route_indexes(STOPS, "수원", "수원")
 
 
 class TestQueryRange:
