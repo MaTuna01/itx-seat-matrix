@@ -125,6 +125,32 @@ export const st = {
   },
   sheetBody: { flex: 1, overflowY: "auto", padding: "0 16px 32px" },
 
+  // ── 즐겨찾기 노선 칩 (D-56). 피그마 ios `iOS/Chip-Route`·`iOS/Chip-RouteAdd` ──
+  favLabelRow: {
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    padding: "0 16px", margin: "0 0 8px",
+  },
+  favCount: { fontSize: 12, color: tk.textFaint },
+  favChips: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 24 },
+  favChip: {
+    display: "inline-flex", alignItems: "center", gap: 6, height: 28,
+    background: "#eef3fb", border: `1px solid #c6d4ea`, borderRadius: 14,
+    padding: "0 10px 0 12px",
+  },
+  favRoute: {
+    border: "none", background: "none", padding: 0, cursor: "pointer",
+    fontSize: 13, fontWeight: 700, color: tk.brandNavy, fontFamily: "inherit",
+  },
+  favDel: {
+    border: "none", background: "none", padding: 0, cursor: "pointer",
+    fontSize: 14, lineHeight: 1, color: tk.textFaint,
+  },
+  favAddChip: {
+    height: 28, background: tk.surface, border: `1.5px dashed ${tk.borderStrong}`,
+    borderRadius: 14, padding: "0 12px", fontSize: 13, fontWeight: 700,
+    color: tk.textMuted, cursor: "pointer", fontFamily: "inherit",
+  },
+
   // ── 그룹 리스트 ──
   // 섹션 라벨은 그룹보다 16pt 더 안쪽이다 (화면 기준 32pt)
   sectionLabel: { fontSize: 13, color: tk.textMuted, padding: "0 16px", margin: "24px 0 8px" },

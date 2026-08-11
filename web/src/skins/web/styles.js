@@ -166,6 +166,29 @@ export const st = {
   },
   pickerItem: { padding: "9px 10px", fontSize: 14, cursor: "pointer" },
 
+  // ── 즐겨찾기 노선 칩 (D-56). 피그마 web `Chip/Route`·`Chip/RouteAdd` ──
+  favRow: { display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12 },
+  favCount: { fontSize: 11, color: "#9aa4b2" },
+  favChips: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 },
+  favChip: {
+    display: "inline-flex", alignItems: "center", gap: 6,
+    background: "#eef3fb", border: "1px solid #c6d4ea", borderRadius: 20,
+    padding: "5px 8px 5px 10px",
+  },
+  favRoute: {
+    border: "none", background: "none", padding: 0, cursor: "pointer",
+    fontSize: 12, fontWeight: 700, color: "#1a3a6b", fontFamily: "inherit",
+  },
+  favDel: {
+    border: "none", background: "none", padding: 0, cursor: "pointer",
+    fontSize: 13, lineHeight: 1, color: "#9aa4b2",
+  },
+  favAddChip: {
+    background: "#fff", border: "1.5px dashed #b7c1d1", borderRadius: 20,
+    padding: "4px 10px", fontSize: 12, fontWeight: 700, color: "#3d4657",
+    cursor: "pointer", fontFamily: "inherit",
+  },
+
   segRow: { display: "flex", gap: 8 },
   // native date/time input은 min-width:auto라 flex로 줄지 않는다 → 겹침 방지
   segCol: { flex: 1, minWidth: 0 },

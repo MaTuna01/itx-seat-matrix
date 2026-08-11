@@ -25,6 +25,12 @@ const CANNED = {
     { id: 2, label: "Mac · Chrome", created_at: "2026-08-02T09:00:00+09:00" },
   ],
   "/api/stations": ["수원", "안양", "영등포", "용산", "청량리", "천안", "평택"].map((name) => ({ name })),
+  // 즐겨찾기 노선 (D-56) — 피그마 05(web)·02(ios) 목업과 같은 3개
+  "/api/presets": [
+    { id: 1, from_station: "수원", to_station: "용산" },
+    { id: 2, from_station: "용산", to_station: "수원" },
+    { id: 3, from_station: "수원", to_station: "청량리" },
+  ].map((p) => ({ ...p, name: `${p.from_station} → ${p.to_station}`, usual_train_nos: [], poll_offsets_min: [10, 4] })),
   "/api/subscriptions": [{ board_at: "수원", alight_at: "청량리" }],
   "/api/trains/search": [
     { train_no: "1073", train_name: "ITX-마음", dep_time: "2026-08-06T07:12:00+09:00", arr_time: "2026-08-06T08:24:00+09:00" },
