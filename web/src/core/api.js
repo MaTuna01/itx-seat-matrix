@@ -81,6 +81,11 @@ export const api = {
     return request(`/api/trains/search?${params}`);
   },
 
+  // 즐겨찾기 노선 (D-56). 계정당 5개 — 초과는 서버가 409로 거절한다
+  presets: () => request("/api/presets"),
+  createPreset: (payload) => request("/api/presets", { method: "POST", body: payload }),
+  deletePreset: (id) => request(`/api/presets/${id}`, { method: "DELETE" }),
+
   // 기본은 활성 구독만 — 라우팅(App.jsx)이 이 결과로 매트릭스/탑승 등록을 가른다.
   // activeOnly:false는 종료한 구독까지 포함한다. 직전 구간 프리필의 소스다 (Setup.jsx).
   subscriptions: ({ activeOnly = true } = {}) =>

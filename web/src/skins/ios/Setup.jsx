@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../../core/api";
+import { MAX_FAVORITES, canSave, routeLabel } from "../../core/favorites";
 import StationPicker from "./StationPicker";
 import { st, tk } from "./styles";
 
@@ -44,6 +45,7 @@ const dateLabel = (ymd) =>
 export default function Setup({ onCreated, onOpenSettings }) {
   const [stations, setStations] = useState([]);
   const [query, setQuery] = useState({ from: "", to: "", ...nowParts() });
+  const [favs, setFavs] = useState([]);
   const [trains, setTrains] = useState(null); // null = 아직 검색 안 함
   const [picked, setPicked] = useState(null);
   const [seated, setSeated] = useState(false);
@@ -56,14 +58,16 @@ export default function Setup({ onCreated, onOpenSettings }) {
   useEffect(() => {
     let alive = true;
     (async () => {
-      // 직전 구간 조회는 **실패해도 되는 부가 기능**이다 — 여기서 막히면 탑승 등록 자체를
-      // 못 한다. 역 목록만 필수로 두고 구독 조회의 실패는 삼킨다.
-      const [list, past] = await Promise.all([
+      // 직전 구간·즐겨찾기 조회는 **실패해도 되는 부가 기능**이다 — 여기서 막히면
+      // 탑승 등록 자체를 못 한다. 역 목록만 필수로 두고 나머지의 실패는 삼킨다.
+      const [list, past, saved] = await Promise.all([
         api.stations(),
         api.subscriptions({ activeOnly: false }).catch(() => []),
+        api.presets().catch(() => []),
       ]);
       if (!alive) return;
       setStations(list);
+      setFavs(saved);
       const route = lastRoute(past, list);
       // 조회가 늦게 도착했는데 사용자가 이미 역을 골랐다면 덮어쓰지 않는다.
       if (route) setQuery((q) => (q.from || q.to ? q : { ...q, ...route }));
@@ -76,6 +80,36 @@ export default function Setup({ onCreated, onOpenSettings }) {
   }, []);
 
   const set = (key) => (e) => setQuery({ ...query, [key]: e.target.value });
+
+  // ── 즐겨찾기 노선 (D-56) ──
+  // 칩은 02 화면(검색 전)에만 있으므로 열차 목록을 따로 비울 필요가 없다 (#67 스왑과 같은 이유).
+  const applyFav = (p) =>
+    setQuery((q) => ({ ...q, from: p.from_station, to: p.to_station }));
+
+  const saveFav = async () => {
+    setError(null);
+    try {
+      const route = { from_station: query.from, to_station: query.to };
+      const created = await api.createPreset({ name: routeLabel(route), ...route });
+      setFavs((prev) => [...prev, created]);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const removeFav = async (id) => {
+    setError(null);
+    try {
+      await api.deletePreset(id);
+      setFavs((prev) => prev.filter((p) => p.id !== id));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  // 출발/도착역 스왑 (#67). 퇴근길은 아침 구간의 역방향이다 — 두 칸을 다시 고르게 하지 않는다.
+  // 이 버튼은 02 화면(검색 전)에만 있으므로 열차 목록을 따로 비울 필요가 없다.
+  const swap = () => setQuery((q) => ({ ...q, from: q.to, to: q.from }));
 
   const search = async (e) => {
     e.preventDefault();
@@ -210,21 +244,66 @@ export default function Setup({ onCreated, onOpenSettings }) {
       </div>
 
       <div style={st.body}>
+        {/* ── 즐겨찾기 노선 (D-56) — 칩 탭 = 구간 채움, × = 삭제 ── */}
+        {(favs.length > 0 || canSave(favs, query.from, query.to)) && (
+          <>
+            <div style={st.favLabelRow}>
+              <span style={{ fontSize: 13, color: tk.textMuted }}>즐겨찾기 노선</span>
+              <span style={st.favCount}>{favs.length}/{MAX_FAVORITES}</span>
+            </div>
+            <div style={st.favChips}>
+              {favs.map((p) => (
+                <span key={p.id} style={st.favChip}>
+                  <button type="button" style={st.favRoute} onClick={() => applyFav(p)}>
+                    {routeLabel(p)}
+                  </button>
+                  <button
+                    type="button" style={st.favDel}
+                    aria-label={`${routeLabel(p)} 삭제`}
+                    onClick={() => removeFav(p.id)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              {canSave(favs, query.from, query.to) && (
+                <button type="button" style={st.favAddChip} onClick={saveFav}>
+                  + 현재 구간 저장
+                </button>
+              )}
+            </div>
+          </>
+        )}
+
         <p style={st.sectionLabel}>구간</p>
-        <div style={st.group}>
-          <button type="button" className="iosRow" style={st.actionRow}
-            disabled={!stations.length} onClick={() => setPicking("from")}>
-            <span style={{ ...st.rowLabel, color: tk.textPrimary }}>출발역</span>
-            <span style={query.from ? st.rowValue : { ...st.rowValue, color: tk.textFaint }}>
-              {query.from || "선택"}
-            </span>
-          </button>
-          <div style={st.sep} />
-          <button type="button" className="iosRow" style={st.actionRow}
-            disabled={!stations.length} onClick={() => setPicking("to")}>
-            <span style={{ ...st.rowLabel, color: tk.textPrimary }}>도착역</span>
-            <span style={query.to ? st.rowValue : { ...st.rowValue, color: tk.textFaint }}>
-              {query.to || "선택"}
+        {/* 피그마 ios `68:317` — 행 두 개는 왼쪽 컬럼, 스왑(iOS/Btn-Swap 78:280)은
+            오른쪽에 세로 중앙. 탭 타깃 44pt (31:200 규칙) */}
+        <div style={{ ...st.group, display: "flex", alignItems: "center", paddingRight: 6 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <button type="button" className="iosRow" style={st.actionRow}
+              disabled={!stations.length} onClick={() => setPicking("from")}>
+              <span style={{ ...st.rowLabel, color: tk.textPrimary }}>출발역</span>
+              <span style={query.from ? st.rowValue : { ...st.rowValue, color: tk.textFaint }}>
+                {query.from || "선택"}
+              </span>
+            </button>
+            <div style={st.sep} />
+            <button type="button" className="iosRow" style={st.actionRow}
+              disabled={!stations.length} onClick={() => setPicking("to")}>
+              <span style={{ ...st.rowLabel, color: tk.textPrimary }}>도착역</span>
+              <span style={query.to ? st.rowValue : { ...st.rowValue, color: tk.textFaint }}>
+                {query.to || "선택"}
+              </span>
+            </button>
+          </div>
+          <button type="button" style={st.swapBtn} onClick={swap}
+            disabled={!query.from && !query.to}
+            aria-label="출발역과 도착역 바꾸기" title="출발역과 도착역 바꾸기">
+            <span style={st.swapCircle}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <path d="M4 14 L4 6.5 L1.5 6.5 L5 1.5 L8.5 6.5 L6 6.5 L6 14 Z" />
+                <path d="M10 2 L10 9.5 L7.5 9.5 L11 14.5 L14.5 9.5 L12 9.5 L12 2 Z" />
+              </svg>
             </span>
           </button>
         </div>

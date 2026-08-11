@@ -191,6 +191,17 @@ class TestSubscriptionTransition:
         )
         assert res.status_code == 422
 
+    def test_뒤집힌_구간으로는_구독을_만들_수_없다(self, client):
+        """구간 스왑(#67)의 서버측 안전장치 — 방향이 틀리면 422로 거부한다."""
+        res = client.post(
+            "/api/subscriptions",
+            json={
+                "train_no": "1004", "date": RIDE_DATE, "board_at": "서울",
+                "alight_at": "천안", "status": "STANDING",
+            },
+        )
+        assert res.status_code == 422
+
     def test_구독_생성시_첫_폴_포인트를_기록한다(self, client):
         sub = make_subscription(client)
         # 천안 08:00 - 10분 (D-19 재시작 내구성 포인터)
@@ -356,6 +367,14 @@ class TestMatrix:
             params={"date": RIDE_DATE, "board_at": "부산", "alight_at": "서울"},
         )
         assert res.status_code == 404
+
+    def test_뒤집힌_구간은_422(self, client):
+        """구간 스왑(#67)의 서버측 안전장치 — 같은 열차에서 방향이 반대면 조회를 거부한다."""
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "서울", "alight_at": "천안"},
+        )
+        assert res.status_code == 422
 
     def test_잘못된_좌석_형식은_422(self, client):
         res = client.get(
@@ -575,6 +594,55 @@ def test_프리셋은_사용자별로_보인다(client, anon_client):
         json={"email": "other@example.com", "password": "commute-1234", "display_name": "남"},
     )
     assert anon_client.get("/api/presets").json() == []
+
+
+def test_프리셋은_계정당_5개까지다(client):
+    """즐겨찾기 노선 상한 (D-56). 6번째는 409, 하나 지우면 다시 저장된다."""
+    for i in range(5):
+        res = client.post(
+            "/api/presets",
+            json={"name": f"노선{i}", "from_station": "천안", "to_station": "서울"},
+        )
+        assert res.status_code == 201
+
+    res = client.post(
+        "/api/presets",
+        json={"name": "여섯째", "from_station": "서울", "to_station": "천안"},
+    )
+    assert res.status_code == 409
+    assert "5개" in res.json()["detail"]
+    assert len(client.get("/api/presets").json()) == 5
+
+    first_id = client.get("/api/presets").json()[0]["id"]
+    assert client.delete(f"/api/presets/{first_id}").status_code == 204
+    res = client.post(
+        "/api/presets",
+        json={"name": "여섯째", "from_station": "서울", "to_station": "천안"},
+    )
+    assert res.status_code == 201
+
+
+def test_프리셋_상한은_사용자별이다(client, anon_client):
+    """다른 계정이 5개를 채워도 내 상한과 무관하다 (user_id 귀속, PLAN 6절)."""
+    for i in range(5):
+        assert (
+            client.post(
+                "/api/presets",
+                json={"name": f"노선{i}", "from_station": "천안", "to_station": "서울"},
+            ).status_code
+            == 201
+        )
+
+    enable_signup(client)
+    anon_client.post(
+        "/api/auth/signup",
+        json={"email": "other@example.com", "password": "commute-1234", "display_name": "남"},
+    )
+    res = anon_client.post(
+        "/api/presets",
+        json={"name": "퇴근", "from_station": "서울", "to_station": "천안"},
+    )
+    assert res.status_code == 201
 
 
 class TestTrainPicker:

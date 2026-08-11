@@ -23,6 +23,7 @@ from app.adapters.delay_zero import ZeroDelayAdapter
 from app.adapters.korail_port import KorailPort
 from app.api.deps import get_delay_port, get_korail_port, now_kst
 from app.auth.session import current_user
+from app.domain.matrix import route_indexes
 from app.domain.models import SubscriptionStatus, User
 from app.domain.timeline import compute_poll_points, first_poll_at
 from app.storage.db import date_from_db, db_session, dt_from_db, to_db
@@ -116,14 +117,13 @@ async def _compute_next_poll_at(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="열차를 찾을 수 없습니다") from exc
     names = [s.name for s in stops]
-    if board_at not in names or alight_at not in names:
-        raise HTTPException(status_code=404, detail="노선에 없는 역입니다")
-    board_idx, alight_idx = names.index(board_at), names.index(alight_at)
-    if board_idx >= alight_idx:
-        raise HTTPException(
-            status_code=422,  # starlette 버전에 따라 상수명이 갈려 숫자로 고정
-            detail="탑승역이 하차역보다 뒤에 있습니다",
-        )
+    try:
+        board_idx, alight_idx = route_indexes(names, board_at, alight_at)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        # starlette 버전에 따라 상수명이 갈려 숫자로 고정
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     delay = await delay_port.get_delay_minutes(train_no, date)
     points = compute_poll_points(stops, board_idx, alight_idx, delay or 0)
     return to_db(first_poll_at(points, now))
