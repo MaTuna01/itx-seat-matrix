@@ -68,6 +68,14 @@ export default function Setup({ onCreated, onOpenSettings }) {
 
   const set = (key) => (e) => setQuery({ ...query, [key]: e.target.value });
 
+  // 출발/도착역 스왑 (#67). 퇴근길은 아침 구간의 역방향이다 — 두 칸을 다시 고르게 하지 않는다.
+  // 방향이 바뀌면 이전 검색 결과는 반대 방향 열차라 무효다 → 목록·선택을 비운다.
+  const swap = () => {
+    setQuery((q) => ({ ...q, from: q.to, to: q.from }));
+    setTrains(null);
+    setPicked(null);
+  };
+
   const search = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -123,6 +131,18 @@ export default function Setup({ onCreated, onOpenSettings }) {
                 onChange={(name) => setQuery((q) => ({ ...q, from: name }))}
                 disabled={!stations.length} required
               />
+            </div>
+            <div style={st.swapCol}>
+              <button
+                type="button" style={st.swapBtn} onClick={swap}
+                disabled={!query.from && !query.to}
+                aria-label="출발역과 도착역 바꾸기" title="출발역과 도착역 바꾸기"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                  <path d="M2 4 L9.5 4 L9.5 1.5 L14.5 5 L9.5 8.5 L9.5 6 L2 6 Z" />
+                  <path d="M14 12 L6.5 12 L6.5 14.5 L1.5 11 L6.5 7.5 L6.5 10 L14 10 Z" />
+                </svg>
+              </button>
             </div>
             <div style={st.segCol}>
               <label style={st.label} htmlFor="to">도착역</label>
