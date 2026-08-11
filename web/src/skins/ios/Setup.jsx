@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../../core/api";
+import { MAX_FAVORITES, canSave, routeLabel } from "../../core/favorites";
 import StationPicker from "./StationPicker";
 import { st, tk } from "./styles";
 
@@ -44,6 +45,7 @@ const dateLabel = (ymd) =>
 export default function Setup({ onCreated, onOpenSettings }) {
   const [stations, setStations] = useState([]);
   const [query, setQuery] = useState({ from: "", to: "", ...nowParts() });
+  const [favs, setFavs] = useState([]);
   const [trains, setTrains] = useState(null); // null = 아직 검색 안 함
   const [picked, setPicked] = useState(null);
   const [seated, setSeated] = useState(false);
@@ -56,14 +58,16 @@ export default function Setup({ onCreated, onOpenSettings }) {
   useEffect(() => {
     let alive = true;
     (async () => {
-      // 직전 구간 조회는 **실패해도 되는 부가 기능**이다 — 여기서 막히면 탑승 등록 자체를
-      // 못 한다. 역 목록만 필수로 두고 구독 조회의 실패는 삼킨다.
-      const [list, past] = await Promise.all([
+      // 직전 구간·즐겨찾기 조회는 **실패해도 되는 부가 기능**이다 — 여기서 막히면
+      // 탑승 등록 자체를 못 한다. 역 목록만 필수로 두고 나머지의 실패는 삼킨다.
+      const [list, past, saved] = await Promise.all([
         api.stations(),
         api.subscriptions({ activeOnly: false }).catch(() => []),
+        api.presets().catch(() => []),
       ]);
       if (!alive) return;
       setStations(list);
+      setFavs(saved);
       const route = lastRoute(past, list);
       // 조회가 늦게 도착했는데 사용자가 이미 역을 골랐다면 덮어쓰지 않는다.
       if (route) setQuery((q) => (q.from || q.to ? q : { ...q, ...route }));
@@ -76,6 +80,31 @@ export default function Setup({ onCreated, onOpenSettings }) {
   }, []);
 
   const set = (key) => (e) => setQuery({ ...query, [key]: e.target.value });
+
+  // ── 즐겨찾기 노선 (D-56) ──
+  const applyFav = (p) =>
+    setQuery((q) => ({ ...q, from: p.from_station, to: p.to_station }));
+
+  const saveFav = async () => {
+    setError(null);
+    try {
+      const route = { from_station: query.from, to_station: query.to };
+      const created = await api.createPreset({ name: routeLabel(route), ...route });
+      setFavs((prev) => [...prev, created]);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const removeFav = async (id) => {
+    setError(null);
+    try {
+      await api.deletePreset(id);
+      setFavs((prev) => prev.filter((p) => p.id !== id));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
 
   const search = async (e) => {
     e.preventDefault();
@@ -210,6 +239,37 @@ export default function Setup({ onCreated, onOpenSettings }) {
       </div>
 
       <div style={st.body}>
+        {/* ── 즐겨찾기 노선 (D-56) — 칩 탭 = 구간 채움, × = 삭제 ── */}
+        {(favs.length > 0 || canSave(favs, query.from, query.to)) && (
+          <>
+            <div style={st.favLabelRow}>
+              <span style={{ fontSize: 13, color: tk.textMuted }}>즐겨찾기 노선</span>
+              <span style={st.favCount}>{favs.length}/{MAX_FAVORITES}</span>
+            </div>
+            <div style={st.favChips}>
+              {favs.map((p) => (
+                <span key={p.id} style={st.favChip}>
+                  <button type="button" style={st.favRoute} onClick={() => applyFav(p)}>
+                    {routeLabel(p)}
+                  </button>
+                  <button
+                    type="button" style={st.favDel}
+                    aria-label={`${routeLabel(p)} 삭제`}
+                    onClick={() => removeFav(p.id)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              {canSave(favs, query.from, query.to) && (
+                <button type="button" style={st.favAddChip} onClick={saveFav}>
+                  + 현재 구간 저장
+                </button>
+              )}
+            </div>
+          </>
+        )}
+
         <p style={st.sectionLabel}>구간</p>
         <div style={st.group}>
           <button type="button" className="iosRow" style={st.actionRow}
