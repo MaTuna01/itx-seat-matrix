@@ -142,6 +142,17 @@ export const st = {
     color: tk.brandNavy, cursor: "pointer",
   },
   destructiveRow: { color: tk.danger },
+  // 출발/도착역 스왑 (#67) — 피그마 ios `iOS/Btn-Swap`(78:280).
+  // 탭 타깃 44pt(31:200 규칙), 비주얼은 28pt 원
+  swapBtn: {
+    width: 44, height: 44, flex: "0 0 auto", border: "none", background: "none",
+    padding: 0, cursor: "pointer", color: tk.brandNavy,
+    display: "flex", alignItems: "center", justifyContent: "center",
+  },
+  swapCircle: {
+    width: 28, height: 28, borderRadius: 14, background: tk.fillTrack,
+    display: "flex", alignItems: "center", justifyContent: "center",
+  },
   // 값 옆의 작은 텍스트 버튼 (해제 등)
   rowBtn: {
     border: "none", background: "none", color: tk.brandNavy, fontSize: 15,

@@ -77,6 +77,10 @@ export default function Setup({ onCreated, onOpenSettings }) {
 
   const set = (key) => (e) => setQuery({ ...query, [key]: e.target.value });
 
+  // 출발/도착역 스왑 (#67). 퇴근길은 아침 구간의 역방향이다 — 두 칸을 다시 고르게 하지 않는다.
+  // 이 버튼은 02 화면(검색 전)에만 있으므로 열차 목록을 따로 비울 필요가 없다.
+  const swap = () => setQuery((q) => ({ ...q, from: q.to, to: q.from }));
+
   const search = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -211,20 +215,34 @@ export default function Setup({ onCreated, onOpenSettings }) {
 
       <div style={st.body}>
         <p style={st.sectionLabel}>구간</p>
-        <div style={st.group}>
-          <button type="button" className="iosRow" style={st.actionRow}
-            disabled={!stations.length} onClick={() => setPicking("from")}>
-            <span style={{ ...st.rowLabel, color: tk.textPrimary }}>출발역</span>
-            <span style={query.from ? st.rowValue : { ...st.rowValue, color: tk.textFaint }}>
-              {query.from || "선택"}
-            </span>
-          </button>
-          <div style={st.sep} />
-          <button type="button" className="iosRow" style={st.actionRow}
-            disabled={!stations.length} onClick={() => setPicking("to")}>
-            <span style={{ ...st.rowLabel, color: tk.textPrimary }}>도착역</span>
-            <span style={query.to ? st.rowValue : { ...st.rowValue, color: tk.textFaint }}>
-              {query.to || "선택"}
+        {/* 피그마 ios `68:317` — 행 두 개는 왼쪽 컬럼, 스왑(iOS/Btn-Swap 78:280)은
+            오른쪽에 세로 중앙. 탭 타깃 44pt (31:200 규칙) */}
+        <div style={{ ...st.group, display: "flex", alignItems: "center", paddingRight: 6 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <button type="button" className="iosRow" style={st.actionRow}
+              disabled={!stations.length} onClick={() => setPicking("from")}>
+              <span style={{ ...st.rowLabel, color: tk.textPrimary }}>출발역</span>
+              <span style={query.from ? st.rowValue : { ...st.rowValue, color: tk.textFaint }}>
+                {query.from || "선택"}
+              </span>
+            </button>
+            <div style={st.sep} />
+            <button type="button" className="iosRow" style={st.actionRow}
+              disabled={!stations.length} onClick={() => setPicking("to")}>
+              <span style={{ ...st.rowLabel, color: tk.textPrimary }}>도착역</span>
+              <span style={query.to ? st.rowValue : { ...st.rowValue, color: tk.textFaint }}>
+                {query.to || "선택"}
+              </span>
+            </button>
+          </div>
+          <button type="button" style={st.swapBtn} onClick={swap}
+            disabled={!query.from && !query.to}
+            aria-label="출발역과 도착역 바꾸기" title="출발역과 도착역 바꾸기">
+            <span style={st.swapCircle}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <path d="M4 14 L4 6.5 L1.5 6.5 L5 1.5 L8.5 6.5 L6 6.5 L6 14 Z" />
+                <path d="M10 2 L10 9.5 L7.5 9.5 L11 14.5 L14.5 9.5 L12 9.5 L12 2 Z" />
+              </svg>
             </span>
           </button>
         </div>
