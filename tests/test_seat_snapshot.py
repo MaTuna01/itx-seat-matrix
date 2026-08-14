@@ -18,7 +18,12 @@ import pytest
 
 from app.domain.models import KST, SeatMap, SeatState
 from app.storage.db import connect, init_db
-from app.storage.seat_snapshot import SqliteSeatSnapshotStore, load, purge_before, record
+from app.storage.seat_snapshot import (
+    SqliteSeatSnapshotStore,
+    load,
+    purge_before,
+    record,
+)
 
 RIDE_DATE = _date(2026, 8, 5)
 
