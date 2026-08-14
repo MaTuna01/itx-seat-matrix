@@ -11,6 +11,7 @@ from app.domain.matrix import (
     merge_seat_maps,
     query_range,
     route_indexes,
+    snapshot_gap_range,
 )
 from app.domain.models import SeatMap, SeatState
 from tests.conftest import RIDE_DATE, STOPS, at
@@ -230,3 +231,33 @@ def test_전_구간_매진이면_전부_판매된_매트릭스다():
     )
     assert verdict.move_to == []
     assert verdict.all_sold_after_current is True
+
+
+# ── 갭 구간 (→ D-57): 스냅샷으로 보여줄 [열차 위치, 실효 시작) ─────────
+class TestSnapshotGapRange:
+    def test_정차_중에는_빈_범위(self):
+        # 위치 == 판매 가능 시작 → 전부 실시간, 스냅샷 없음
+        assert snapshot_gap_range(2, 2, 0, 5) == (2, 2)
+
+    def test_주행_중에는_현재_구간_하나(self):
+        # 평택→수원 주행 중: 위치 1, 판매 가능 2
+        assert snapshot_gap_range(1, 2, 0, 5) == (1, 2)
+
+    def test_탑승_전에는_빈_범위(self):
+        # 열차가 아직 탑승역 앞 — 위치 0, sellable 0, 탑승 2
+        assert snapshot_gap_range(0, 0, 2, 5) == (2, 2)
+
+    def test_마지막_구간_주행_중(self):
+        # decision_needed=False가 되는 그 상태 — 스냅샷이 가장 절실한 순간
+        assert snapshot_gap_range(4, 5, 0, 5) == (4, 5)
+
+    def test_탑승역_클램프(self):
+        # 위치가 탑승역보다 앞이어도 갭은 탑승역부터
+        assert snapshot_gap_range(0, 3, 2, 5) == (2, 3)
+
+    def test_하차역_클램프(self):
+        assert snapshot_gap_range(4, 7, 0, 5) == (4, 5)
+
+    def test_잘못된_구간은_거부(self):
+        with pytest.raises(ValueError):
+            snapshot_gap_range(0, 0, 3, 3)

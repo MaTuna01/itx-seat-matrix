@@ -320,7 +320,8 @@ class TestMatrix:
         # 지금 앉을 수 있는 좌석이 있으므로 지연 착석 목록은 별도로 유지된다 (합치지 않는다)
         assert "move_to_later" in verdict
         assert body["failed_seg_idxs"] == []  # 정상 조회 (→ D-48)
-        assert body["next_poll"] == {"station": "천안", "offset_min": 10}
+        assert body["snapshots"] == []  # 운행 전 — 갭 구간이 없다 (→ D-57)
+        assert body["next_poll"] == {"station": "천안", "offset_min": 10, "basis": "arrival"}
 
     def test_한_구간이_실패해도_200과_부분_매트릭스를_준다(self, client, monkeypatch):
         """★ 회귀 방어 (이슈 #40). 예전에는 한 구간의 실패가 **매트릭스 전체를 500**으로
@@ -399,6 +400,85 @@ class TestMatrix:
         assert row["last_verdict_hash"] is None
         assert row["last_cells_snapshot"] is None
         assert row["last_notified_at"] is None
+
+    # ── 갭 구간 스냅샷 (→ D-57) ─────────────────────────────────────
+    def _mid_ride(self, hour: int, minute: int, monkeypatch) -> None:
+        """운행 중 시각으로 화면 시계를 고정한다 (트레인 시각표는 08:00~08:56)."""
+        from datetime import date as _date2, time as _time2
+
+        import app.api.trains as trains_mod
+
+        frozen = datetime.combine(
+            _date2.fromisoformat(RIDE_DATE), _time2(hour, minute), tzinfo=KST
+        )
+        monkeypatch.setattr(trains_mod, "now_kst", lambda: frozen)
+
+    def test_주행_중이면_갭_구간_스냅샷을_내려준다(self, client, monkeypatch):
+        """★ D-57의 핵심 배선. 08:16 = 평택 출발(08:15) 후 수원 도착(08:26) 전 —
+        타고 있는 평택→수원 구간은 조회 범위 밖이지만, 마지막 성공 조회가 있으면
+        표시 전용으로 내려간다. 판정(start_seg_idx)은 D-47대로 다음 구간이다."""
+        from datetime import date as _date2, time as _time2
+
+        from app.domain.models import SeatMap, SeatState
+        from app.storage import seat_snapshot
+
+        as_of = datetime.combine(_date2.fromisoformat(RIDE_DATE), _time2(8, 14), tzinfo=KST)
+        with connect(db_path()) as conn:
+            seat_snapshot.record(
+                conn,
+                SeatMap(
+                    train_no="1004", date=_date2.fromisoformat(RIDE_DATE),
+                    frm="평택", to="수원",
+                    seats=[
+                        SeatState(car=3, seat_no="7A", sold=True),
+                        SeatState(car=4, seat_no="1B", sold=False),
+                    ],
+                    fetched_at=as_of,
+                ),
+            )
+        self._mid_ride(8, 16, monkeypatch)
+
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["current_seg_idx"] == 1  # 위치: 평택→수원 주행 중
+        assert body["verdict"]["start_seg_idx"] == 2  # 판정은 수원부터 (D-47 불변)
+        assert len(body["snapshots"]) == 1
+        snap = body["snapshots"][0]
+        assert snap["seg_idx"] == 1
+        assert snap["as_of"].startswith(f"{RIDE_DATE}T08:14:00")
+        assert {(s["car"], s["seat_no"], s["sold"]) for s in snap["seats"]} == {
+            (3, "7A", True), (4, "1B", False),
+        }
+
+    def test_스냅샷이_없으면_빈_리스트로_폴백한다(self, client, monkeypatch):
+        self._mid_ride(8, 16, monkeypatch)
+        res = client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["snapshots"] == []  # 프론트는 기존 회색(past) 표시로 폴백
+
+    def test_스냅샷이_있어도_알림_상태는_그대로다(self, client, monkeypatch):
+        """절대규칙 5 재확인 — 스냅샷 배선이 화면 조회에 쓰기 경로를 더했지만
+        (seat_snapshot), 알림 상태는 여전히 스케줄러만 기록한다."""
+        sub = make_subscription(client, status="SEATED", my_car=3, my_seat_no="7A")
+        self._mid_ride(8, 16, monkeypatch)
+        client.get(
+            "/api/trains/1004/matrix",
+            params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울", "my_seat": "3-7A"},
+        )
+        with connect(db_path()) as conn:
+            row = conn.execute(
+                "SELECT last_verdict_hash, last_cells_snapshot FROM subscription WHERE id = ?",
+                (sub["id"],),
+            ).fetchone()
+        assert row["last_verdict_hash"] is None
+        assert row["last_cells_snapshot"] is None
 
     # ── GPS 포그라운드 보정 (D-13) ──────────────────────────────────
     def _seed_mock_route_coords(self) -> None:

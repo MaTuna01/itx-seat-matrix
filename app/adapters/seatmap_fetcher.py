@@ -67,6 +67,23 @@ class SeatMapCache(Protocol):
         ...
 
 
+class SeatMapRecorder(Protocol):
+    """구간별 마지막 성공 조회 기록 경계 (→ D-57). 구현은 `storage/seat_snapshot.py`.
+
+    캐시와 달리 **쓰기 전용**이다 — 조회 경로는 스냅샷을 읽지 않는다. 갭 구간
+    (지금 타고 있는 구간)을 화면이 "HH:MM 조회 기준"으로 보여주기 위한 표시 전용
+    데이터라 스케줄러·화면 양 경로 모두 기록해도 알림 상태(절대규칙 5)와 무관하다.
+
+    기록 조건 불변식: **조회 시점에 sellable했던 구간의 성공한 조회만** 여기 온다.
+    호출부가 조회 범위를 이미 `[max(sellable, board), alight)`로 좁혀서 들어오고
+    (D-47), 실패는 예외로 빠져 SeatMap 자체가 생기지 않는다. 캐시 히트는 기록하지
+    않는다 — 원 조회 때 이미 기록됐다.
+    """
+
+    def record(self, seat_map: SeatMap) -> None:
+        ...
+
+
 async def _with_retry(
     call: Callable[[], Awaitable[SeatMap]],
     policy: RetryPolicy,
@@ -120,6 +137,7 @@ async def fetch_segment_maps(
     concurrency: int = MAX_CONCURRENCY,
     jitter: tuple[float, float] | None = JITTER_RANGE,
     cache: SeatMapCache | None = None,
+    recorder: SeatMapRecorder | None = None,
     retry: RetryPolicy = DEFAULT_RETRY,
     now: datetime | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -153,6 +171,9 @@ async def fetch_segment_maps(
 
         if cache is not None:
             cache.put(seat_map)
+        if recorder is not None:
+            # 실조회 성공 직후에만 — 캐시 히트는 위에서 이미 반환됐다 (D-57)
+            recorder.record(seat_map)
         return seg_idx, seat_map
 
     segments = list(range(start_idx, end_idx))
@@ -190,6 +211,7 @@ async def fetch_matrix(
     now: datetime,
     jitter: tuple[float, float] | None = JITTER_RANGE,
     cache: SeatMapCache | None = None,
+    recorder: SeatMapRecorder | None = None,
     retry: RetryPolicy = DEFAULT_RETRY,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> SeatMatrix:
@@ -204,6 +226,7 @@ async def fetch_matrix(
         end_idx,
         jitter=jitter,
         cache=cache,
+        recorder=recorder,
         retry=retry,
         now=now,
         sleep=sleep,

@@ -17,6 +17,7 @@ class TimelineConfig:
     """조정 예정 값은 설정을 가진 순수 함수로 격리한다 (D-17)."""
 
     poll_offsets_min: tuple[int, ...] = (10, 4)  # 정차역 실효 도착 n분 전 (D-12)
+    depart_poll_offsets_min: tuple[int, ...] = (1,)  # 정차역 실효 출발 n분 전 (D-57)
     grace_min: int = 2  # 늦은 폴 유예 (D-19)
 
 
@@ -117,11 +118,16 @@ def compute_poll_points(
     delay_min: int = 0,
     config: TimelineConfig = DEFAULT_TIMELINE,
 ) -> list[datetime]:
-    """폴 포인트 목록 = 이용 구간 각 정차역의 실효 도착시각 - offsets (PLAN 9절).
+    """폴 포인트 목록 = 이용 구간 각 정차역의 실효 도착 - offsets + 실효 출발 - offsets (PLAN 9절).
 
     범위는 `stops[board_idx] ~ stops[alight_idx - 1]`:
     - 탑승역 도착 전 조회는 그대로 두는 것이 **탑승 전 착석 가능 다이제스트**가 된다 (D-18)
     - 하차역 도착 전 조회는 취할 행동이 없으므로 제외한다 (호출량 최소화, PLAN 10절)
+
+    출발 -1분 포인트(D-57)는 -4분 조회와 출발 사이(막판 발권 창)에 팔린 좌석까지
+    갭 구간 스냅샷에 담기 위한 마지막 관측이다. A역 출발 -1분이 B역 도착 -10분과
+    겹치는 경우는 set이 흡수한다. 실행 시점에 `sellable_seg_idx`를 재계산하므로
+    grace 지각으로 출발을 넘겨도 그 구간 조회는 자연히 스킵된다.
 
     반환값은 오름차순 정렬 + 중복 제거.
     """
@@ -133,6 +139,9 @@ def compute_poll_points(
         eff = effective_arrival(stops[i], delay_min)
         for offset in config.poll_offsets_min:
             points.add(eff - timedelta(minutes=offset))
+        dep = effective_departure(stops[i], delay_min)
+        for offset in config.depart_poll_offsets_min:
+            points.add(dep - timedelta(minutes=offset))
     return sorted(points)
 
 
@@ -155,11 +164,16 @@ def first_poll_at(
 
 @dataclass(frozen=True)
 class PollHint:
-    """다음 자동 조회 안내 (화면 표시용, PLAN 7절 `next_poll`)."""
+    """다음 자동 조회 안내 (화면 표시용, PLAN 7절 `next_poll`).
+
+    `basis`는 offset의 기준 시각이다 — `"arrival"`(도착 -N분) | `"departure"`(출발 -N분, D-57).
+    문구는 여기서 만들지 않는다 — 분기는 `core/format.js`의 몫이다 (D-50).
+    """
 
     station: str
     offset_min: int
     at: datetime
+    basis: str = "arrival"
 
 
 def next_poll_hint(
@@ -170,13 +184,18 @@ def next_poll_hint(
     now: datetime,
     config: TimelineConfig = DEFAULT_TIMELINE,
 ) -> PollHint | None:
-    """`now` 이후 가장 이른 폴 포인트를 (역, offset)과 함께 돌려준다."""
+    """`now` 이후 가장 이른 폴 포인트를 (역, offset, 기준)과 함께 돌려준다."""
     now = _require_aware(now)
     hints: list[PollHint] = []
     for i in range(board_idx, alight_idx):
         eff = effective_arrival(stops[i], delay_min)
         for offset in config.poll_offsets_min:
             hints.append(PollHint(station=stops[i].name, offset_min=offset, at=eff - timedelta(minutes=offset)))
+        dep = effective_departure(stops[i], delay_min)
+        for offset in config.depart_poll_offsets_min:
+            hints.append(
+                PollHint(station=stops[i].name, offset_min=offset, at=dep - timedelta(minutes=offset), basis="departure")
+            )
     upcoming = sorted((h for h in hints if h.at >= now), key=lambda h: h.at)
     return upcoming[0] if upcoming else None
 

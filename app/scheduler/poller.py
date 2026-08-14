@@ -56,6 +56,7 @@ from app.domain.timeline import (
 from app.domain.verdict import build_verdict
 from app.storage.creds import load_korail_cred
 from app.storage.db import date_from_db, dt_from_db, get_conn, to_db
+from app.storage.seat_snapshot import SqliteSeatSnapshotStore, purge_before
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +106,9 @@ async def run_tick(deps: PollerDeps, *, now: datetime) -> TickReport:
     """
     report = TickReport()
     with deps.conn_factory() as conn:
+        # 지난 운행일 스냅샷 청소 (D-57). D-34의 만료 안전망과 같은 자리 — 규모가 작아
+        # 매 틱 돌려도 부담이 없고, 별도 잡을 두면 그 잡이 죽은 것을 아무도 모른다
+        purge_before(conn, now.date())
         rows = conn.execute(
             "SELECT * FROM subscription"
             " WHERE active = 1 AND (next_poll_at IS NULL OR next_poll_at <= ?)"
@@ -204,6 +208,8 @@ async def _run_one(
             # ★ cache를 넘기지 않는다. 캐시된 값으로 판정하면 상태 변화를 놓쳐
             #   알림이 조용히 안 온다 (D-17). 60초 캐시는 화면 트래픽 전용이다
             cache=None,
+            # 스냅샷 기록은 캐시가 아니라 쓰기 전용 훅이다 — 갭 구간 표시용 (D-57)
+            recorder=SqliteSeatSnapshotStore(conn),
             retry=deps.retry,
             jitter=deps.jitter,
             sleep=deps.sleep,

@@ -24,13 +24,15 @@ from app.adapters.seatmap_fetcher import SCREEN_RETRY, fetch_matrix
 from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
 from app.auth.session import current_user
 from app.domain.geo import GeoFix, is_fix_usable, project_onto_route
-from app.domain.matrix import query_range, route_indexes
+from app.domain.matrix import query_range, route_indexes, snapshot_gap_range
 from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
 from app.domain.timeline import estimate_seg, next_poll_hint, sellable_seg_idx
 from app.domain.verdict import build_verdict
 from app.storage import stations as station_repo
 from app.storage.db import db_session
+from app.storage import seat_snapshot
 from app.storage.matrix_cache import SqliteSeatMapCache
+from app.storage.seat_snapshot import SqliteSeatSnapshotStore
 
 router = APIRouter(prefix="/api/trains", tags=["trains"])
 
@@ -44,6 +46,23 @@ class SeatRowOut(BaseModel):
 class NextPollOut(BaseModel):
     station: str
     offset_min: int
+    # offset의 기준: "arrival"(도착 -N분) | "departure"(출발 -N분, D-57).
+    # 기본값은 하위호환 — 구형 캐시본(`readCachedMatrix`)에 없어도 안전해야 한다
+    basis: str = "arrival"
+
+
+class SnapshotSeatOut(BaseModel):
+    car: int
+    seat_no: str
+    sold: bool
+
+
+class SnapshotSegOut(BaseModel):
+    """갭 구간(지금 타고 있는 구간)의 마지막 성공 조회 (→ D-57). 표시 전용."""
+
+    seg_idx: int  # 전체 노선 stops 기준 (D-18)
+    as_of: datetime  # 조회 시각 (KST aware) — "HH:MM 조회" 배지의 근거
+    seats: list[SnapshotSeatOut]
 
 
 class MatrixOut(BaseModel):
@@ -63,6 +82,9 @@ class MatrixOut(BaseModel):
     # 조회에 실패한 구간 (→ D-48). 셀은 채움값(판매됨)으로 들어가므로 이 값이 없으면
     # **화면이 조회 실패와 매진을 구분할 수 없다** — 사용자에게 전혀 다른 정보다
     failed_seg_idxs: list[int]
+    # 갭 구간의 마지막 성공 조회 (→ D-57). verdict 계산 **이후** 채워진다 —
+    # 판정·알림·추천에는 절대 유입되지 않는다 (#35 재발 방지)
+    snapshots: list[SnapshotSegOut] = []
     verdict: Verdict
     next_poll: NextPollOut | None
     fetched_at: datetime
@@ -187,6 +209,8 @@ async def get_matrix(
             end_idx,
             now=now,
             cache=SqliteSeatMapCache(conn),
+            # 화면 실조회도 스냅샷을 남긴다 — 표시 전용 데이터라 알림 상태와 무관 (D-57)
+            recorder=SqliteSeatSnapshotStore(conn),
             retry=SCREEN_RETRY,
         )
     except CredentialsRequired as exc:
@@ -206,6 +230,26 @@ async def get_matrix(
     )
     hint = next_poll_hint(stops, board_idx, alight_idx, delay_minutes or 0, now)
 
+    # 갭 구간(지금 타고 있는 구간)의 마지막 성공 조회 (→ D-57). verdict가 끝난 뒤에만
+    # 채운다 — 표시 전용이라는 경계를 코드 순서로도 지킨다. GPS 보정이 있으면
+    # current_seg_idx가 실측이므로 갭이 더 정확해진다
+    gap_start, gap_end = snapshot_gap_range(current_seg_idx, sellable_idx, board_idx, alight_idx)
+    snapshots: list[SnapshotSegOut] = []
+    for seg_idx in range(gap_start, gap_end):
+        snap = seat_snapshot.load(conn, train_no, date, names[seg_idx], names[seg_idx + 1])
+        if snap is None:
+            continue  # 스냅샷이 없으면 프론트가 기존 회색(past) 표시로 폴백한다
+        snapshots.append(
+            SnapshotSegOut(
+                seg_idx=seg_idx,
+                as_of=snap.fetched_at,
+                seats=[
+                    SnapshotSeatOut(car=s.car, seat_no=s.seat_no, sold=s.sold)
+                    for s in snap.seats
+                ],
+            )
+        )
+
     return MatrixOut(
         train_no=train_no,
         train_name=train_name,
@@ -221,7 +265,12 @@ async def get_matrix(
         my_seat_no=my_seat_no,
         seats=[SeatRowOut(car=s.car, seat_no=s.seat_no, cells=s.cells) for s in matrix.seats],
         failed_seg_idxs=matrix.failed_seg_idxs,
+        snapshots=snapshots,
         verdict=verdict,
-        next_poll=NextPollOut(station=hint.station, offset_min=hint.offset_min) if hint else None,
+        next_poll=(
+            NextPollOut(station=hint.station, offset_min=hint.offset_min, basis=hint.basis)
+            if hint
+            else None
+        ),
         fetched_at=matrix.fetched_at,
     )

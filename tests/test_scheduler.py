@@ -751,3 +751,37 @@ async def test_전_구간_실패는_기존대로_FETCH_FAILED다(db):
     await run_tick(deps, now=at(8, 38))
     assert spy.kinds == ["FETCH_FAILED"]
     assert row_of(db, sub_id)["fail_count"] == 1
+
+
+# ── 스냅샷 기록 (→ D-57): 폴이 성공한 구간을 남기는가 ─────────────────
+async def test_폴이_성공하면_구간_스냅샷이_남는다(db):
+    from app.storage import seat_snapshot
+
+    port, spy = FakePort(cells()), SpyNotifier()
+    deps = deps_for(db, port, spy)
+    make_sub(db)
+
+    # 08:16(수원 -10분): 평택 출발 후라 조회 범위는 수원-안양부터 (D-47)
+    await run_tick(deps, now=SUWON_POINT_10)
+
+    snap = seat_snapshot.load(db, TRAIN_NO, RIDE_DATE, "수원", "안양")
+    assert snap is not None
+    assert {(s.car, s.seat_no) for s in snap.seats} == {(3, "7A"), (4, "1B"), (4, "2B"), (3, "9A")}
+    # 조회 범위 밖(이미 출발한 구간)은 애초에 조회되지 않았으니 기록도 없다
+    assert seat_snapshot.load(db, TRAIN_NO, RIDE_DATE, "천안", "평택") is None
+
+
+async def test_지난_운행일_스냅샷은_틱이_청소한다(db):
+    from app.storage import seat_snapshot
+    from app.domain.models import SeatMap
+
+    stale = SeatMap(
+        train_no=TRAIN_NO, date=RIDE_DATE - timedelta(days=1),
+        frm="천안", to="평택", seats=[], fetched_at=at(7, 0),
+    )
+    seat_snapshot.record(db, stale)
+    port, spy = FakePort(cells()), SpyNotifier()
+
+    await run_tick(deps_for(db, port, spy), now=SUWON_POINT_10)
+
+    assert seat_snapshot.load(db, TRAIN_NO, RIDE_DATE - timedelta(days=1), "천안", "평택") is None
