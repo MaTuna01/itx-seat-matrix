@@ -21,6 +21,65 @@ export function minutesAgo(iso, now = Date.now()) {
   return m <= 0 ? "방금" : `${m}분 전`;
 }
 
+// ── 갭 구간 스냅샷 (→ D-57) — 표시 전용. 판정·추천 계산에는 절대 쓰지 않는다 ──
+//
+// 서버 `snapshots`를 구간 인덱스로 찾을 수 있게 뒤집는다.
+// bySeat에 없는 좌석은 **판매됨**으로 읽는다 — D-18의 부재 추론과 같은 방향.
+export function buildSnapshotIndex(snapshots) {
+  const index = new Map();
+  for (const snap of snapshots || []) {
+    const bySeat = new Map();
+    for (const seat of snap.seats) bySeat.set(seatKey(seat), seat.sold);
+    index.set(snap.seg_idx, { asOf: snap.as_of, bySeat });
+  }
+  return index;
+}
+
+// "07:11 조회" — 스냅샷 배지 문구. 기기 로컬 TZ가 아니라 KST로 고정한다 (절대규칙 1)
+export function asOfLabel(iso) {
+  const t = new Date(iso).toLocaleTimeString("ko-KR", {
+    hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Seoul",
+  });
+  return `${t} 조회`;
+}
+
+// "다음 자동 조회: 수원 도착 4분 전" | "… 수원 출발 1분 전" — basis 분기도 문구이므로
+// 여기서만 만든다 (D-50). basis가 없는 구형 캐시본은 도착으로 읽는다 (하위호환)
+export function nextPollLabel(nextPoll) {
+  const basis = nextPoll.basis === "departure" ? "출발" : "도착";
+  return `다음 자동 조회: ${nextPoll.station} ${basis} ${nextPoll.offset_min}분 전`;
+}
+
+// 마지막 구간 주행 중에는 조회가 0회라 live 좌석 유니버스가 비어 있다 — 행 자체를
+// 스냅샷에서 만든다. 정렬은 (호차, 좌석번호) — clear_until이 없으므로 buildRows의
+// 정렬 기준을 흉내 내지 않는다 (그건 live 관측의 언어다).
+export function snapshotRows(snapshots) {
+  const seen = new Map();
+  for (const snap of snapshots || [])
+    for (const seat of snap.seats) {
+      const key = seatKey(seat);
+      if (!seen.has(key)) seen.set(key, { car: seat.car, seat_no: seat.seat_no, cells: [], key });
+    }
+  return [...seen.values()].sort(
+    (a, b) => a.car - b.car || a.seat_no.localeCompare(b.seat_no)
+  );
+}
+
+// 스냅샷 전용 행의 좌석 문구 — live 셀이 없으므로 seatWindow를 쓸 수 없다.
+// "…까지 빈 좌석"이라고 말하지 않는다: 스냅샷은 갭 구간만 덮고, 그마저 이전 관측이다.
+export function snapshotSeatWindow(key, snapshotIndex) {
+  let sawAny = false;
+  let allClear = true;
+  for (const { bySeat } of snapshotIndex.values()) {
+    sawAny = true;
+    if (bySeat.get(key) ?? true) allClear = false; // 부재 = 판매 (D-18)
+  }
+  if (!sawAny) return [seg("이전 조회 정보 없음")];
+  return allClear
+    ? [seg("이전 조회 기준 "), seg("빈 자리", true), seg(" · 지금 앉아도 되는 자리")]
+    : [seg("이전 조회 기준 판매됨")];
+}
+
 // verdict.py의 clear_until과 같은 규칙 (표시 전용)
 export function clearUntil(seat, startIdx, alightIdx) {
   let until = startIdx;
@@ -109,15 +168,26 @@ export function summarize({ verdict, data, stops, startIdx }) {
   const transfer = [seg("남은 구간 잔여 좌석 없음 · "), seg("지하철 환승", true), seg("이 나을 수 있음")];
 
   // 이용 구간의 마지막 구간을 달리는 중 — 팔 수 있는 구간이 없어 조회도 하지 않는다.
-  // 여기서 빈 매트릭스를 그대로 그리면 "전부 매진"으로 읽힌다 (→ D-47)
+  // 여기서 빈 매트릭스를 그대로 그리면 "전부 매진"으로 읽힌다 (→ D-47).
+  // 단 **갭 구간 스냅샷이 있으면 그 열은 그린다** (→ D-57) — 막판까지 서서 가는
+  // 사람에게 "빈 자리였던 칸 = 지금 앉아도 되는 자리"가 가장 절실한 순간이다.
   if (verdict.decision_needed === false) {
+    const hasSnapshot = (data.snapshots || []).length > 0;
     return {
       chip: null,
       status: { text: `곧 ${alightAt} 도착`, tone: "ok" },
-      detail: [seg("이동 판단 불필요 · 남은 구간에 살 수 있는 좌석이 없습니다")],
+      detail: hasSnapshot
+        ? [
+            seg("마지막 구간 주행 중 · 아래 칸의 "),
+            seg("빈 자리는 지금 앉아도 되는 자리", true),
+            seg("입니다 (이전 조회 기준)"),
+          ]
+        : [seg("이동 판단 불필요 · 남은 구간에 살 수 있는 좌석이 없습니다")],
       later: null,
       showStandButton: false,
-      showMatrix: false,
+      showMatrix: hasSnapshot,
+      // 행 유니버스가 비어 있다 — 스킨은 snapshotRows로 행을 만들고 필터를 숨긴다
+      snapshotOnly: hasSnapshot,
     };
   }
 

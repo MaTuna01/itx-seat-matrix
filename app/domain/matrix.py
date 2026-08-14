@@ -71,6 +71,28 @@ def query_range(sellable_seg_idx: int, board_idx: int, alight_idx: int) -> tuple
     return start, alight_idx
 
 
+def snapshot_gap_range(
+    current_seg_idx: int, sellable_seg_idx: int, board_idx: int, alight_idx: int
+) -> tuple[int, int]:
+    """스냅샷으로 보여줄 갭 구간 `[start, end)` (→ D-57). 빈 범위일 수 있다.
+
+    갭 = **지금 타고 있는데 더는 팔 수 없는 구간** = `[열차 위치, 실효 시작)`.
+    이용 구간으로 클램프한다 — 탑승 전 구간(board 이전)과 하차 이후는 관심 밖이고,
+    완전히 지나온 구간은 기존 회색(past) 표시를 유지한다.
+
+    - 정차 중(위치 == 실효 시작)이면 빈 범위 — 스냅샷 없이 전부 실시간
+    - 마지막 구간 주행 중이면 `[alight-1, alight)` — `decision_needed=False`여도
+      이 범위의 스냅샷이 있으면 화면은 매트릭스를 그린다
+
+    표시 전용이다. 판정·알림·추천은 이 범위를 모른다 (#35 재발 방지).
+    """
+    if not (0 <= board_idx < alight_idx):
+        raise ValueError(f"구간 인덱스가 올바르지 않다: board={board_idx}, alight={alight_idx}")
+    start = min(max(current_seg_idx, board_idx), alight_idx)
+    end = min(max(sellable_seg_idx, board_idx), alight_idx)
+    return start, max(start, end)
+
+
 def merge_seat_maps(
     *,
     train_no: str,

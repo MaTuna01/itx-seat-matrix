@@ -152,6 +152,64 @@ async def test_scheduler_path_bypasses_cache(conn) -> None:
     assert len(port.calls) == 4
 
 
+# ── 스냅샷 기록 훅 (→ D-57): 성공한 실조회만 기록되는가 ──────────────────
+class RecordingList:
+    """SeatMapRecorder 최소 구현 — 기록된 구간 키만 모은다."""
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[str, str]] = []
+
+    def record(self, seat_map: SeatMap) -> None:
+        self.recorded.append((seat_map.frm, seat_map.to))
+
+
+async def test_recorder_records_real_fetches(conn) -> None:
+    port = CountingPort()
+    recorder = RecordingList()
+    await fetch_segment_maps(
+        port, None, "1004", RIDE_DATE, STOPS, 0, 2, jitter=None,
+        recorder=recorder, now=at(8, 0, 10),
+    )
+    assert recorder.recorded == [("천안", "평택"), ("평택", "수원")]
+
+
+async def test_recorder_skips_cache_hits(conn) -> None:
+    """캐시 히트는 기록하지 않는다 — 원 조회 때 이미 기록됐다 (D-57)."""
+    port = CountingPort()
+    cache = SqliteSeatMapCache(conn)
+    first = RecordingList()
+    await fetch_segment_maps(
+        port, None, "1004", RIDE_DATE, STOPS, 0, 2, jitter=None,
+        cache=cache, recorder=first, now=at(8, 0, 10),
+    )
+    assert len(first.recorded) == 2
+
+    second = RecordingList()
+    await fetch_segment_maps(
+        port, None, "1004", RIDE_DATE, STOPS, 0, 2, jitter=None,
+        cache=cache, recorder=second, now=at(8, 0, 20),
+    )
+    assert second.recorded == []  # 전 구간 캐시 히트 → 기록 없음
+
+
+async def test_recorder_skips_failed_segments(conn) -> None:
+    """실패 구간은 SeatMap이 생기지 않으므로 기록될 수 없다 — 오염 방지 ① (D-57)."""
+
+    class HalfFailPort:
+        async def get_seat_map(self, cred, train_no, d, frm, to):  # noqa: ANN001, ANN201
+            if frm == "천안":
+                raise KorailApiError("ERR911081 좌석선택 예약불가")
+            return make_map(frm, to, sold=True, fetched_at=at(8, 0))
+
+    recorder = RecordingList()
+    result = await fetch_segment_maps(
+        HalfFailPort(), None, "1004", RIDE_DATE, STOPS, 0, 2, jitter=None,
+        recorder=recorder, retry=NO_RETRY, now=at(8, 0, 10),
+    )
+    assert result.failed_idxs == [0]
+    assert recorder.recorded == [("평택", "수원")]
+
+
 async def test_cache_is_populated_by_fetch(conn) -> None:
     port = CountingPort()
     await fetch_segment_maps(

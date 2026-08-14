@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, cacheMatrix, readCachedMatrix } from "../../core/api";
-import { buildRows, failureSummary, minutesAgo, seatWindow, summarize } from "../../core/format";
+import {
+  asOfLabel,
+  buildRows,
+  buildSnapshotIndex,
+  failureSummary,
+  minutesAgo,
+  nextPollLabel,
+  seatWindow,
+  snapshotRows,
+  snapshotSeatWindow,
+  summarize,
+} from "../../core/format";
 import { st, tk } from "./styles";
 
 // 피그마 ios `26:110`(06 입석) · `26:227`(07 착석) · `28:142`(08 오프라인) · `28:258`(09 실패).
@@ -42,6 +53,24 @@ const CELL = {
   past: { background: "#f0f2f5", borderColor: "#e2e6eb" },
   sold: { background: "#f6d5d0", borderColor: "#eab5ad" },
   empty: { background: "#e9f7ef", borderColor: "#bfe5cf" },
+  // 갭 구간 스냅샷 (→ D-57, 피그마 iOS/Cell-Snap-*). 색상 유지 + 채움 55% +
+  // **점선 테두리** — 색만으로 실시간과 구분하지 않는다 (색각 안전)
+  snapEmpty: { background: "rgba(233,247,239,0.55)", borderColor: "#8fcaa8", borderStyle: "dashed" },
+  snapSold: { background: "rgba(246,213,208,0.55)", borderColor: "#d9a099", borderStyle: "dashed" },
+};
+
+// "07:11 조회" 배지 (피그마 iOS/Badge-AsOf)
+const asOfBadge = {
+  display: "inline-block",
+  marginTop: 3,
+  padding: "1px 7px",
+  fontSize: 10,
+  fontWeight: 700,
+  color: "#6b7686",
+  background: "#fff",
+  border: "1px dashed #b7c1d1",
+  borderRadius: 11,
+  whiteSpace: "nowrap",
 };
 
 export default function SeatMatrix({ subscription, onSubscriptionChange, onReset, onOpenSettings }) {
@@ -146,13 +175,21 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   const { rows, myPinned } = buildRows({
     seats, startIdx, alightIdx, seated, myCar: data.my_car, myKey, onlyClear,
   });
-  const selectedSeat = rows.find((s) => s.key === selected);
+
+  // 판정 문구 일체 — 문장은 core가 만든다 (→ D-50)
+  const summary = summarize({ verdict, data, stops, startIdx });
+
+  // 갭 구간(지금 타고 있는 구간)의 마지막 성공 조회 (→ D-57). **표시 전용**
+  const snapshotIndex = buildSnapshotIndex(data.snapshots);
+  // 마지막 구간 주행 중에는 live 좌석 유니버스가 비어 있다 — 행을 스냅샷에서 만든다
+  const displayRows = summary.snapshotOnly && rows.length === 0 ? snapshotRows(data.snapshots) : rows;
+  const selectedSeat = displayRows.find((s) => s.key === selected);
   // 내 자리는 옮길 대상이 아니므로 바를 띄우지 않는다
   const showActionBar = !!selectedSeat && selectedSeat.key !== myKey;
 
   // 좌석 열 폭은 태그(`내 자리`·`END`)가 있을 때만 넓힌다. 태그가 생겼다 사라지면 폭이
   // 한 번 바뀌지만, 그건 판정 자체가 바뀌는 순간이라 조용히 어긋나 보일 일이 없다.
-  const hasTag = rows.some((s) => s.key === myKey || s.clear_all);
+  const hasTag = displayRows.some((s) => s.key === myKey || s.clear_all);
   const seatCol = hasTag ? SEAT_COL : SEAT_COL_NARROW;
   const tableW = seatCol + segments.length * SEG_MIN;
   const scrolls = tableW > BODY_W;
@@ -164,8 +201,6 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   // 출발·하차는 바로 위 줄(`용산 → 광주송정 · 자유석`)이 이미 말하므로 중복이었다.
   const namedIdx = Math.min(Math.max(posIdx + 1, boardIdx), alightIdx);
 
-  // 판정 문구 일체 — 문장은 core가 만든다 (→ D-50)
-  const summary = summarize({ verdict, data, stops, startIdx });
   const failed = failureSummary(failedSegs, stops);
 
   return (
@@ -280,11 +315,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           {failed && (
             <p style={{ ...st.verdictSub, color: tk.warn }}>⚠ <Segs parts={failed} /></p>
           )}
-          {data.next_poll && (
-            <p style={st.nextPoll}>
-              다음 자동 조회: {data.next_poll.station} 도착 {data.next_poll.offset_min}분 전
-            </p>
-          )}
+          {data.next_poll && <p style={st.nextPoll}>{nextPollLabel(data.next_poll)}</p>}
           {error && <p style={{ ...st.nextPoll, color: tk.danger }}>갱신 실패: {error}</p>}
         </section>
 
@@ -294,19 +325,28 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
         {summary.showMatrix && (
           <>
             <div style={st.filterRow}>
-              <button
-                onClick={() => setOnlyClear(!onlyClear)}
-                style={{
-                  ...st.filterBtn,
-                  background: onlyClear ? tk.brandNavy : tk.surface,
-                  color: onlyClear ? tk.onBrand : tk.brandNavy,
-                }}
-              >
-                {data.alight_at}까지 빈 좌석만
-              </button>
-              <span style={st.legend}>
+              {/* 스냅샷 전용(마지막 구간)에는 live 관측이 없어 필터가 무의미하다 (→ D-57) */}
+              {!summary.snapshotOnly && (
+                <button
+                  onClick={() => setOnlyClear(!onlyClear)}
+                  style={{
+                    ...st.filterBtn,
+                    background: onlyClear ? tk.brandNavy : tk.surface,
+                    color: onlyClear ? tk.onBrand : tk.brandNavy,
+                  }}
+                >
+                  {data.alight_at}까지 빈 좌석만
+                </button>
+              )}
+              <span style={{ ...st.legend, marginLeft: "auto" }}>
                 <i style={{ ...st.swatch, ...CELL.empty }} />빈자리
                 <i style={{ ...st.swatch, ...CELL.sold, marginLeft: 4 }} />판매
+                {snapshotIndex.size > 0 && (
+                  <>
+                    <i style={{ ...st.swatch, background: "#fff", borderColor: "#b7c1d1", borderStyle: "dashed", marginLeft: 4 }} />
+                    이전 조회
+                  </>
+                )}
                 {failedSegs.size > 0 && (
                   <>
                     <i style={{ ...st.swatch, ...CELL.unknown, marginLeft: 4 }} />조회 실패
@@ -323,17 +363,22 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                     <th style={{ ...st.thSeat, ...st.stickySeat, width: seatCol, background: tk.surface, zIndex: 2 }}>
                       좌석
                     </th>
-                    {segments.map((seg) => (
-                      <th key={seg.idx} style={{ ...st.thSeg, opacity: seg.idx < startIdx ? 0.35 : 1 }}>
-                        <StopLabel name={seg.from} />
-                        <div>{failedSegs.has(seg.idx) ? "?" : "↓"}</div>
-                        <StopLabel name={seg.to} />
-                      </th>
-                    ))}
+                    {segments.map((seg) => {
+                      const snap = snapshotIndex.get(seg.idx);
+                      // 스냅샷 열은 흐리지 않는다 — 지금 타고 있는 구간이고, 배지가 낡음을 말한다
+                      return (
+                        <th key={seg.idx} style={{ ...st.thSeg, opacity: !snap && seg.idx < startIdx ? 0.35 : 1 }}>
+                          <StopLabel name={seg.from} />
+                          <div>{failedSegs.has(seg.idx) ? "?" : "↓"}</div>
+                          <StopLabel name={seg.to} />
+                          {snap && <span style={asOfBadge}>{asOfLabel(snap.asOf)}</span>}
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((s) => {
+                  {displayRows.map((s) => {
                     const isMine = s.key === myKey;
                     const isSel = s.key === selected;
                     // 최상단이 "내 자리"로 바뀌었으므로 구분선으로 가른다 — 안 그러면
@@ -352,11 +397,22 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
                           {s.clear_all && !isMine && <span style={st.endTag}>END</span>}
                         </td>
                         {segments.map((seg) => {
-                          const sold = s.cells[seg.idx];
-                          const past = seg.idx < startIdx;
-                          // 실패는 지나온 구간보다 먼저 본다 — 조회 범위 안에서만 실패가 생긴다
+                          // 실패 > 스냅샷 > 지나온 구간 > 실시간 순으로 본다.
+                          // 스냅샷 셀은 live cells가 아니라 **스냅샷 관측**을 읽는다 — 갭 구간의
+                          // live 셀은 조회하지 않은 채움값(판매됨)이라 그대로 그리면 거짓이다 (D-57)
                           const unknown = failedSegs.has(seg.idx);
-                          const look = unknown ? CELL.unknown : past ? CELL.past : sold ? CELL.sold : CELL.empty;
+                          const snap = !unknown && snapshotIndex.get(seg.idx);
+                          const past = seg.idx < startIdx;
+                          const sold = snap ? snap.bySeat.get(s.key) ?? true : s.cells[seg.idx];
+                          const look = unknown
+                            ? CELL.unknown
+                            : snap
+                            ? CELL[sold ? "snapSold" : "snapEmpty"]
+                            : past
+                            ? CELL.past
+                            : sold
+                            ? CELL.sold
+                            : CELL.empty;
                           return (
                             <td key={seg.idx} style={{ ...st.tdCell, ...sep }}>
                               <div style={{ ...st.cell, ...look }}>{unknown ? "?" : ""}</div>
@@ -387,7 +443,13 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             {/* 문장은 core가 만든다 — 지금 팔린 좌석에 "…까지 빈 좌석"을 찍으면
                 판정 카드와 다른 말을 하게 된다 (→ D-52 ⑥) */}
             <div style={{ fontSize: 13, color: tk.textMuted }}>
-              <Segs parts={seatWindow(selectedSeat, { stops, startIdx, alightIdx })} />
+              <Segs
+                parts={
+                  summary.snapshotOnly
+                    ? snapshotSeatWindow(selectedSeat.key, snapshotIndex)
+                    : seatWindow(selectedSeat, { stops, startIdx, alightIdx })
+                }
+              />
             </div>
           </div>
           <button style={st.sitBtn} disabled={busy}
