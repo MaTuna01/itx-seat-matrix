@@ -31,6 +31,7 @@ from app.domain.verdict import build_verdict
 from app.storage import stations as station_repo
 from app.storage.db import db_session
 from app.storage.matrix_cache import SqliteSeatMapCache
+from app.storage.seat_snapshot import SqliteSeatSnapshotStore
 
 router = APIRouter(prefix="/api/trains", tags=["trains"])
 
@@ -187,6 +188,8 @@ async def get_matrix(
             end_idx,
             now=now,
             cache=SqliteSeatMapCache(conn),
+            # 화면 실조회도 스냅샷을 남긴다 — 표시 전용 데이터라 알림 상태와 무관 (D-57)
+            recorder=SqliteSeatSnapshotStore(conn),
             retry=SCREEN_RETRY,
         )
     except CredentialsRequired as exc:
