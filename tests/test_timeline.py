@@ -98,16 +98,36 @@ class TestSellableSegIdx:
 class TestPollPoints:
     def test_이용_구간_정차역마다_offset만큼_앞선_포인트(self):
         points = compute_poll_points(stop_infos(), board_idx=0, alight_idx=5)
-        # 천안~영등포 5개 역 × 2 offsets. 하차역(서울) 도착 전 조회는 취할 행동이 없어 제외
-        assert len(points) == 10
+        # 천안~영등포 5개 역 × (도착 2 + 출발 1) = 15개인데, 천안 출발-1분(08:02)이
+        # 평택 도착-10분과, 수원 출발-1분(08:28)이 안양 도착-10분과 겹쳐 13개 (D-57 dedup)
+        assert len(points) == 13
         assert points[0] == at(7, 50)  # 천안 08:00 - 10분 → 탑승 전 다이제스트 (D-18)
         assert points[1] == at(7, 56)
-        assert max(points) == at(8, 44)  # 영등포 08:48 - 4분
+        assert max(points) == at(8, 50)  # 영등포 출발 08:51 - 1분 (D-57)
         assert points == sorted(points)
+
+    def test_출발_1분_전_포인트가_추가된다(self):
+        points = compute_poll_points(stop_infos(), board_idx=0, alight_idx=5)
+        assert at(8, 14) in points  # 평택 출발 08:15 - 1분 — 도착 기준으로는 안 나오는 시각
+        assert at(8, 40) in points  # 안양 출발 08:41 - 1분
 
     def test_부분_구간_구독(self):
         points = compute_poll_points(stop_infos(), board_idx=2, alight_idx=4)
-        assert points == [at(8, 16), at(8, 22), at(8, 28), at(8, 34)]
+        # 수원 08:16/08:22(도착)·08:28(출발-1) + 안양 08:28/08:34(도착)·08:40(출발-1)
+        assert points == [at(8, 16), at(8, 22), at(8, 28), at(8, 34), at(8, 40)]
+
+    def test_출발_offset은_설정값이다(self):
+        config = TimelineConfig(depart_poll_offsets_min=())
+        points = compute_poll_points(stop_infos(), 2, 4, config=config)
+        assert points == [at(8, 16), at(8, 22), at(8, 28), at(8, 34)]  # D-57 이전과 동일
+
+    def test_출발시각이_없으면_도착시각으로_폴백(self):
+        stops = stop_infos()
+        bare = stops[2].model_copy(update={"departure": None})  # 수원 출발 결측 → 도착 08:26 폴백
+        patched = stops[:2] + [bare] + stops[3:]
+        points = compute_poll_points(patched, board_idx=2, alight_idx=4)
+        assert at(8, 25) in points  # 수원 '출발'(폴백 = 도착 08:26) - 1분
+        assert at(8, 28) in points  # 안양 도착 -10분은 그대로
 
     def test_지연이_폴_포인트를_뒤로_민다(self):
         points = compute_poll_points(stop_infos(), 0, 5, delay_min=7)
@@ -127,8 +147,13 @@ class TestPollPoints:
         assert first_poll_at(points, at(9, 0)) is None
 
     def test_다음_조회_안내(self):
+        # 08:14 = 평택 출발(08:15) 1분 전 — 출발 기준 포인트가 먼저 온다 (D-57)
         hint = next_poll_hint(stop_infos(), 0, 5, 0, at(8, 14))
-        assert (hint.station, hint.offset_min) == ("수원", 10)
+        assert (hint.station, hint.offset_min, hint.basis) == ("평택", 1, "departure")
+
+    def test_다음_조회_안내_도착_기준(self):
+        hint = next_poll_hint(stop_infos(), 0, 5, 0, at(8, 15))
+        assert (hint.station, hint.offset_min, hint.basis) == ("수원", 10, "arrival")
 
 
 class TestResolvePoll:
@@ -161,8 +186,8 @@ class TestResolvePoll:
     def test_재시작_후_여러_포인트를_한꺼번에_건너뛴다(self, points):
         # 컨테이너가 08:00~08:30 동안 죽어 있었다: DB 포인터는 08:02에 멈춰 있다 (D-19)
         d = resolve_poll(next_poll_at=at(8, 2), poll_points=points, now=at(8, 29))
-        assert d.fire is True  # 08:28(안양 -10분)은 grace 이내라 살아난다
-        assert d.skipped == [at(8, 2), at(8, 8), at(8, 16), at(8, 22)]
+        assert d.fire is True  # 08:28(안양 -10분 = 수원 출발 -1분)은 grace 이내라 살아난다
+        assert d.skipped == [at(8, 2), at(8, 8), at(8, 14), at(8, 16), at(8, 22)]
         assert d.next_poll_at == at(8, 34)
 
     def test_남은_포인트가_없으면_포인터를_비운다(self, points):
