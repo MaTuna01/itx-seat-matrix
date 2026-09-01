@@ -21,10 +21,10 @@ from pydantic import BaseModel, model_validator
 
 from app.adapters.delay_zero import ZeroDelayAdapter
 from app.adapters.korail_port import KorailPort
-from app.api.deps import get_delay_port, get_korail_port, now_kst
+from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
+from app.api.stops import resolve_route
 from app.auth.session import current_user
-from app.domain.matrix import route_indexes
-from app.domain.models import SubscriptionStatus, User
+from app.domain.models import KorailCred, StopInfo, SubscriptionStatus, User
 from app.domain.timeline import compute_poll_points, first_poll_at
 from app.storage.db import date_from_db, db_session, dt_from_db, to_db
 
@@ -99,31 +99,21 @@ def _load_own(conn: sqlite3.Connection, sub_id: int, user_id: int) -> sqlite3.Ro
 
 
 async def _compute_next_poll_at(
-    port: KorailPort,
     delay_port: ZeroDelayAdapter,
     *,
     train_no: str,
     date: _date,
-    board_at: str,
-    alight_at: str,
+    stops: list[StopInfo],
+    board_idx: int,
+    alight_idx: int,
     now: datetime,
 ) -> str | None:
     """구독 생성/갱신 시 첫 폴 포인트를 기록한다 (D-19 재시작 내구성).
 
     30초 틱은 이 포인터만 보고 실행/전진한다 (Phase 3).
+    노선 해석은 상위(`create_subscription`)에서 `resolve_route`로 이미 끝냈다 —
+    여기서 다시 하면 `TrainStopsNotCached`(RuntimeError)가 새어나가 500이 된다 (이슈 #75).
     """
-    try:
-        stops = await port.get_stops(None, train_no, date)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="열차를 찾을 수 없습니다") from exc
-    names = [s.name for s in stops]
-    try:
-        board_idx, alight_idx = route_indexes(names, board_at, alight_at)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        # starlette 버전에 따라 상수명이 갈려 숫자로 고정
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     delay = await delay_port.get_delay_minutes(train_no, date)
     points = compute_poll_points(stops, board_idx, alight_idx, delay or 0)
     return to_db(first_poll_at(points, now))
@@ -150,15 +140,27 @@ async def create_subscription(
     conn: sqlite3.Connection = Depends(db_session),
     port: KorailPort = Depends(get_korail_port),
     delay_port: ZeroDelayAdapter = Depends(get_delay_port),
+    cred: KorailCred | None = Depends(get_korail_cred),
 ) -> SubscriptionOut:
     now = now_kst()
-    next_poll_at = await _compute_next_poll_at(
+    # 정차역 캐시 미스/노선 불일치는 여기서 사용자용 404로 매핑된다 (이슈 #75, app/api/stops.py)
+    stops, board_idx, alight_idx = await resolve_route(
         port,
-        delay_port,
+        cred,
+        conn,
         train_no=payload.train_no,
         date=payload.date,
         board_at=payload.board_at,
         alight_at=payload.alight_at,
+        now=now,
+    )
+    next_poll_at = await _compute_next_poll_at(
+        delay_port,
+        train_no=payload.train_no,
+        date=payload.date,
+        stops=stops,
+        board_idx=board_idx,
+        alight_idx=alight_idx,
         now=now,
     )
     cur = conn.execute(
