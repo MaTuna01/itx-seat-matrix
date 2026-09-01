@@ -13,19 +13,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
 
 from app.adapters.delay_zero import ZeroDelayAdapter
 from app.adapters.notify import build_notifier
+from app.adapters.train_run_info import (
+    NoDataForDay,
+    ReloadStats,
+    reload_needed,
+    reload_train_stops,
+)
 from app.config import Settings, get_settings
 from app.domain.models import KST
 from app.scheduler.poller import PollerDeps, run_tick
+from app.storage.db import get_conn
+from app.storage.train_stops import latest_source_run_ymd
 
 log = logging.getLogger(__name__)
 
 _JOB_ID = "poll_subscriptions"
+_RELOAD_JOB_ID = "reload_train_stops"
+_RELOAD_CATCHUP_ID = "reload_train_stops_catchup"
 
 
 def build_deps(settings: Settings | None = None) -> PollerDeps:
@@ -99,8 +110,85 @@ class PollerService:
             max_instances=1,
             misfire_grace_time=self._settings.scheduler_interval_seconds,
         )
+        self._register_stops_reload()
         self._scheduler.start()
         log.info("폴링 스케줄러 시작 (%s초 간격)", self._settings.scheduler_interval_seconds)
+
+    def _register_stops_reload(self) -> None:
+        """정차역 캐시 일일 자동 재적재 (D-58, 이슈 #76).
+
+        키가 없으면 조용히 건너뛴다 (mock/dev 환경에서 스케줄러 자체는 그대로 돈다).
+        06:05·12:05 두 시각 + 기동 후 60초 캐치업 — 세 호출 모두 `reload_needed`
+        게이트로 멱등이라 실제 네트워크는 첫 성공 한 번만.
+        """
+        if not self._settings.data_go_kr_service_key:
+            log.warning(
+                "DATA_GO_KR_SERVICE_KEY 미설정 — 정차역 캐시 자동 재적재를 시작하지 않는다 "
+                "(mock/dev 환경에서 정상. 실 배포에서는 .env 확인)."
+            )
+            return
+        hours = self._settings.stops_reload_hours
+        self._scheduler.add_job(
+            self.reload_stops,
+            "cron",
+            hour=hours,
+            minute=self._settings.stops_reload_minute,
+            id=_RELOAD_JOB_ID,
+            coalesce=True,
+            max_instances=1,
+        )
+        # 기동 캐치업 — 낮 배포/주말 수동 기동을 위한 60초 후 1회 실행
+        self._scheduler.add_job(
+            self.reload_stops,
+            DateTrigger(run_date=datetime.now(KST) + timedelta(seconds=60)),
+            id=_RELOAD_CATCHUP_ID,
+            coalesce=True,
+            max_instances=1,
+        )
+        log.info(
+            "정차역 캐시 재적재 잡 등록 (cron hours=%s minute=%s, 기동 60초 후 캐치업)",
+            hours, self._settings.stops_reload_minute,
+        )
+
+    async def reload_stops(self) -> None:
+        """정차역 캐시 재적재 (D-58). 게이트 → fetch → apply_day.
+
+        시계는 여기서만 읽는다 (service.py가 실 클록의 유일한 지점).
+        실패는 로그만 — 알림 5종 불변(CLAUDE.md 규칙 6), FETCH_FAILED는 구독 단위(D-34).
+        """
+        now = datetime.now(KST)
+        latest = await asyncio.to_thread(self._latest_source_ymd)
+        if not reload_needed(latest, now):
+            log.debug("정차역 캐시 최신(%s) — 재적재 스킵", latest)
+            return
+
+        run_ymd = now.date() - timedelta(days=1)
+        settings = self._settings
+        try:
+            stats: ReloadStats = await asyncio.to_thread(
+                reload_train_stops,
+                run_ymd=run_ymd,
+                key=settings.data_go_kr_service_key,
+                now=now,
+                max_age_days=settings.train_stop_max_age_days,
+            )
+        except NoDataForDay as exc:
+            # 개편 첫날처럼 D-1 실적이 하루 늦게 공개되는 경우 — 다음 게이트 호출을 기다린다
+            log.info("정차역 재적재: %s (다음 시각에 재시도)", exc)
+            return
+        except Exception:  # noqa: BLE001 — 잡이 죽으면 다음 스케줄이 없다
+            log.exception("정차역 재적재 실패 (%s 실적)", run_ymd)
+            return
+
+        log.info(
+            "정차역 캐시 재적재 완료: %s 실적 · 열차 %s편 · 역 %s개 · 퍼지 %s행",
+            stats.run_ymd, stats.trains, stats.stations, stats.purged,
+        )
+
+    @staticmethod
+    def _latest_source_ymd():
+        with get_conn() as conn:
+            return latest_source_run_ymd(conn)
 
     def shutdown(self) -> None:
         if self._scheduler.running:
