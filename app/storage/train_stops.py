@@ -127,3 +127,14 @@ def freshness(conn: sqlite3.Connection, train_no: str) -> _date | None:
 
 def count_trains(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(DISTINCT train_no) FROM train_stop").fetchone()[0]
+
+
+def latest_source_run_ymd(conn: sqlite3.Connection) -> _date | None:
+    """전체 캐시에서 가장 최근 관측 운행일 (재적재 게이트 · 사용자 문구용, 이슈 #75/#76).
+
+    개별 열차의 신선도는 `freshness()`가 준다 — 이 함수는 "캐시 자체가 얼마나 낡았나".
+    """
+    row = conn.execute("SELECT MAX(source_run_ymd) AS latest FROM train_stop").fetchone()
+    if row is None or row["latest"] is None:
+        return None
+    return _date.fromisoformat(row["latest"])

@@ -654,6 +654,65 @@ class TestKorailErrorMapping:
             params={"date": RIDE_DATE, "board_at": "천안", "alight_at": "서울"},
         )
         assert res.status_code == 404
+        detail = res.json()["detail"]
+        # 개발자용 스크립트 경로가 그대로 새어나가면 안 된다 (이슈 #75)
+        assert "scripts/" not in detail
+        assert "load_train_stops" not in detail
+
+    def test_정차역_캐시_미스는_구독_등록에서도_404다(self, client):
+        """번호가 캐시에 없으면 `_compute_next_poll_at`이 `TrainStopsNotCached`를
+        잡지 않아 500이 나던 회귀 (이슈 #75). 이제 404여야 한다.
+        """
+        self._override(_TrainStopsNotCachedPort())
+        res = client.post(
+            "/api/subscriptions",
+            json={
+                "train_no": "9999", "date": RIDE_DATE,
+                "board_at": "천안", "alight_at": "서울", "status": "STANDING",
+            },
+        )
+        assert res.status_code == 404, res.text
+        assert "scripts/" not in res.json()["detail"]
+
+    def test_노선_불일치는_기준일과_함께_404(self, client, monkeypatch):
+        """9/1 개편 재현 — 캐시엔 있지만 board_at이 그 열차 정차역에 없는 케이스.
+
+        Mock 어댑터가 기본 6개 역만 갖고 있으니 그 밖의 역명("대전")으로 요청한다.
+        """
+        # `freshness()`/`latest_source_run_ymd()`는 실제 DB 조회라 값이 None으로 나온다 —
+        # 테스트에선 순수 함수 유닛(test_stops_errors)이 기준일 절을 커버하므로 여기선
+        # 상태코드와 역명 노출만 확인한다.
+        from app.adapters.korail_mock import MockKorailAdapter
+
+        class _MockWithCheonan(MockKorailAdapter):
+            async def get_stops(self, cred, train_no, d):
+                # 목업 열차 1004의 정차역엔 "대전"이 없다 — LookupError 유발
+                return await super().get_stops(cred, "1004", d)
+
+        self._override(_MockWithCheonan())
+        res = client.post(
+            "/api/subscriptions",
+            json={
+                "train_no": "1004", "date": RIDE_DATE,
+                "board_at": "대전", "alight_at": "서울", "status": "STANDING",
+            },
+        )
+        assert res.status_code == 404, res.text
+        detail = res.json()["detail"]
+        assert "'대전'" in detail
+        assert "1004" in detail
+        assert "scripts/" not in detail
+
+    def test_순서_역전은_여전히_422다(self, client):
+        """알림·상태 규칙과 무관한 사용자 입력 오류는 계속 422 (regression guard)."""
+        res = client.post(
+            "/api/subscriptions",
+            json={
+                "train_no": "1004", "date": RIDE_DATE,
+                "board_at": "서울", "alight_at": "천안", "status": "STANDING",
+            },
+        )
+        assert res.status_code == 422, res.text
 
 
 def test_프리셋은_사용자별로_보인다(client, anon_client):
