@@ -41,6 +41,18 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_interval_seconds: int = 30
 
+    # ── 정차역 캐시 자동 재적재 (D-58, 이슈 #76) ─────────────────────
+    # 공공데이터 '한국철도공사_열차운행정보' 인증키 — 시크릿, .env로만 넣는다.
+    # scripts/load_train_stops.py 도 같은 값을 읽는다 (.env fallback).
+    data_go_kr_service_key: str = ""
+    # cron 시각: 06:05 = EC2 평일 06:00 기동(D-54) 직후, 12:05 = 낮 복구 창구.
+    # 콤마 구분 문자열 — APScheduler `cron` 트리거가 그대로 해석한다
+    stops_reload_hours: str = "6,12"
+    stops_reload_minute: int = 5
+    # 스테일 번호 퍼지 임계. 7일 = 주말 공백(월요일 적재=일요일 실적)까지 커버.
+    # `<` 부등호로 컷오프 정확일은 유지 (adapters/train_run_info.apply_day)
+    train_stop_max_age_days: int = 7
+
     # ── 로깅 (PLAN 12절, → D-39) ────────────────────────────────────
     # 배포에서 스케줄러가 도는지 확인할 유일한 수단이다 (`docker compose logs`).
     # uvicorn은 자기 로거만 설정하고 root는 비워두므로 앱이 직접 붙여야 한다
