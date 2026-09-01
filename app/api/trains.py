@@ -18,13 +18,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.adapters.delay_zero import ZeroDelayAdapter
-from app.adapters.korail2_adapter import CredentialsRequired, TrainStopsNotCached
+from app.adapters.korail2_adapter import CredentialsRequired
 from app.adapters.korail_port import KorailPort
 from app.adapters.seatmap_fetcher import SCREEN_RETRY, fetch_matrix
 from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
+from app.api.stops import resolve_route
 from app.auth.session import current_user
 from app.domain.geo import GeoFix, is_fix_usable, project_onto_route
-from app.domain.matrix import query_range, route_indexes, snapshot_gap_range
+from app.domain.matrix import query_range, snapshot_gap_range
 from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
 from app.domain.timeline import estimate_seg, next_poll_hint, sellable_seg_idx
 from app.domain.verdict import build_verdict
@@ -148,20 +149,14 @@ async def get_matrix(
     now = now_kst()
     my_car, my_seat_no = parse_my_seat(my_seat)
 
-    try:
-        stops = await port.get_stops(cred, train_no, date)
-    except TrainStopsNotCached as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="열차를 찾을 수 없습니다") from exc
+    # 정차역 캐시 미스/노선 불일치는 여기서 사용자용 404로 매핑된다 (이슈 #75, app/api/stops.py)
+    stops, board_idx, alight_idx = await resolve_route(
+        port, cred, conn,
+        train_no=train_no, date=date,
+        board_at=board_at, alight_at=alight_at,
+        now=now,
+    )
     names = [s.name for s in stops]
-    try:
-        board_idx, alight_idx = route_indexes(names, board_at, alight_at)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        # starlette 버전에 따라 상수명이 갈려 숫자로 고정
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     train_name = await port.get_train_name(train_no, date)
     delay_minutes = await delay_port.get_delay_minutes(train_no, date)
