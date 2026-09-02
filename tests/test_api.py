@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.adapters.korail2_adapter import CredentialsRequired, TrainStopsNotCached
 from app.api.deps import get_korail_port
+from app.api.trains import GPS_NOTE_PARTIAL
 from app.domain.models import KST
 from app.storage.db import connect, db_path, dt_from_db
 from app.storage.stations import Station, upsert
@@ -304,6 +305,7 @@ class TestMatrix:
         assert body["stops"] == ["천안", "평택", "수원", "안양", "영등포", "서울"]
         assert body["current_seg_idx"] == 0
         assert body["position_source"] == "schedule"  # GPS 파라미터를 안 보냈다
+        assert body["position_note"] is None  # 안 보냈으면 사유도 없다 (D-59)
         assert len(body["seats"]) == 18
         assert body["sub_status"] == "SEATED"
         verdict = body["verdict"]
@@ -507,6 +509,7 @@ class TestMatrix:
         body = res.json()
         assert body["position_source"] == "gps"
         assert body["current_seg_idx"] == 2
+        assert body["position_note"] is None  # 채택됐으면 사유 없음
 
     def test_GPS_정확도가_나쁘면_무시하고_시각표_추정을_쓴다(self, client):
         self._seed_mock_route_coords()
@@ -523,6 +526,8 @@ class TestMatrix:
         body = res.json()
         assert body["position_source"] == "schedule"
         assert body["current_seg_idx"] == 0
+        note = body["position_note"]  # 왜 못 썼는지 노출 (D-59)
+        assert "500m" in note and "100m" in note
 
     def test_GPS_시각이_낡으면_무시하고_시각표_추정을_쓴다(self, client):
         self._seed_mock_route_coords()
@@ -537,6 +542,9 @@ class TestMatrix:
         )
         body = res.json()
         assert body["position_source"] == "schedule"
+        note = body["position_note"]
+        # 요청 처리 지연으로 나이가 60초에서 조금 흔들리므로 정확한 초는 단정하지 않는다
+        assert note.startswith("GPS ") and "30초" in note
 
     def test_GPS_파라미터_일부만_오면_무시한다(self, client):
         """★ 넷 다 있어야 시도한다 — 신선도를 판단할 수 없는 상태로 좌표만 믿으면 안 된다."""
@@ -550,6 +558,7 @@ class TestMatrix:
         )
         body = res.json()
         assert body["position_source"] == "schedule"
+        assert body["position_note"] == GPS_NOTE_PARTIAL
 
     def test_GPS_좌표가_노선에서_멀면_시각표_추정으로_폴백(self, client):
         self._seed_mock_route_coords()
@@ -564,6 +573,8 @@ class TestMatrix:
         )
         body = res.json()
         assert body["position_source"] == "schedule"
+        note = body["position_note"]
+        assert "km" in note and "300m" in note  # 이탈 거리 + 임계값
 
     def test_station_테이블에_좌표가_없으면_시각표_추정을_쓴다(self, client):
         """station 테이블 미적재 개발 환경에서도 화면이 죽지 않아야 한다."""
@@ -577,6 +588,7 @@ class TestMatrix:
             },
         )
         assert res.status_code == 200
+        assert res.json()["position_note"] == "이 구간 역 좌표 없음"
         assert res.json()["position_source"] == "schedule"
 
 

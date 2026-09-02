@@ -24,7 +24,16 @@ from app.adapters.seatmap_fetcher import SCREEN_RETRY, fetch_matrix
 from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
 from app.api.stops import resolve_route
 from app.auth.session import current_user
-from app.domain.geo import GeoFix, is_fix_usable, project_onto_route
+from app.domain.geo import (
+    REJECT_INACCURATE,
+    REJECT_NO_COORDS,
+    REJECT_OFF_ROUTE,
+    REJECT_STALE,
+    GeoFix,
+    GeoRejection,
+    fix_rejection,
+    project_onto_route_detail,
+)
 from app.domain.matrix import query_range, snapshot_gap_range
 from app.domain.models import KST, KorailCred, SubscriptionStatus, TrainSummary, User, Verdict
 from app.domain.timeline import estimate_seg, next_poll_hint, sellable_seg_idx
@@ -73,6 +82,10 @@ class MatrixOut(BaseModel):
     stops: list[str]
     current_seg_idx: int
     position_source: str  # "schedule" | "gps" (gps는 Phase 2)
+    # GPS 파라미터를 보냈는데 쓰지 않은 이유 (D-59). 안 보냈거나 채택됐으면 None.
+    # 화면의 배지 옆 작은 글씨 + GeoConfig 조정 신호. 기본값은 하위호환 —
+    # 구형 캐시본(`readCachedMatrix`)에 이 필드가 없어도 안전해야 한다
+    position_note: str | None = None
     delay_minutes: int | None
     board_at: str
     alight_at: str
@@ -89,6 +102,33 @@ class MatrixOut(BaseModel):
     verdict: Verdict
     next_poll: NextPollOut | None
     fetched_at: datetime
+
+
+# GPS를 못 쓴 이유를 사용자 문구로 (D-59). 도메인 어휘(geo.py)를 여기서 한국어로 바꾼다
+# — 선례: `app/api/stops.py::stops_error_detail`. 배지 옆 작은 글씨로 뜨고, 실사용 분포가
+# 쌓이면 GeoConfig 임계값 조정의 근거가 된다.
+GPS_NOTE_PARTIAL = "GPS 값 일부 누락 — 시각표 추정 사용"
+
+
+def _fmt_m(meters: float) -> str:
+    """350 → '350m', 1234 → '1.2km'. 1km 미만은 미터, 이상은 소수 첫째 자리 km."""
+    if meters < 1000:
+        return f"{meters:.0f}m"
+    return f"{meters / 1000:.1f}km"
+
+
+def position_note_for(rej: GeoRejection) -> str:
+    """`GeoRejection` → 사용자용 한국어 문구. 관측값·임계값을 함께 보여 조정 근거가 되게 한다."""
+    if rej.reason == REJECT_STALE:
+        return f"GPS {rej.value:.0f}초 전 값 — {rej.limit:.0f}초 초과"
+    if rej.reason == REJECT_INACCURATE:
+        return f"GPS 정확도 {_fmt_m(rej.value or 0)} — {_fmt_m(rej.limit or 0)} 초과"
+    if rej.reason == REJECT_OFF_ROUTE:
+        return f"노선에서 {_fmt_m(rej.value or 0)} 떨어짐 — {_fmt_m(rej.limit or 0)} 초과"
+    if rej.reason == REJECT_NO_COORDS:
+        return "이 구간 역 좌표 없음"
+    # REJECT_FUTURE: 기기 시계가 앞서 미래 좌표가 옴 — 낡음과 다른 조정 이야기라 따로 둔다
+    return "GPS 시각이 기기 시계보다 앞섬 — 시계 오차"
 
 
 def parse_my_seat(my_seat: str | None) -> tuple[int | None, str | None]:
@@ -162,22 +202,33 @@ async def get_matrix(
     delay_minutes = await delay_port.get_delay_minutes(train_no, date)
     current_seg_idx = estimate_seg(stops, delay_minutes or 0, now)
     position_source = "schedule"
+    position_note: str | None = None
 
     # GPS 포그라운드 보정 (D-13). 넷 다 있어야 시도한다 — 일부만 오면 신선도를
-    # 판단할 수 없으므로 시각표 추정을 그대로 둔다(안전한 방향, D-21).
-    if None not in (lat, lng, gps_accuracy_m, gps_fixed_at_ms):
-        fix = GeoFix(
-            lat=lat,
-            lng=lng,
-            accuracy_m=gps_accuracy_m,
-            fixed_at=datetime.fromtimestamp(gps_fixed_at_ms / 1000, tz=KST),
-        )
-        if is_fix_usable(fix, now=now):
-            coords = station_repo.coords_for(conn, names)
-            gps_idx = project_onto_route(names, coords, lat, lng)
-            if gps_idx is not None:
-                current_seg_idx = gps_idx
-                position_source = "gps"
+    # 판단할 수 없으므로 시각표 추정을 그대로 둔다(안전한 방향, D-21). 못 쓴 이유는
+    # `position_note`로 노출한다 (D-59) — 조용한 폴백이 GeoConfig 조정을 막았었다.
+    gps_params = (lat, lng, gps_accuracy_m, gps_fixed_at_ms)
+    if any(p is not None for p in gps_params):
+        if None in gps_params:
+            position_note = GPS_NOTE_PARTIAL
+        else:
+            fix = GeoFix(
+                lat=lat,
+                lng=lng,
+                accuracy_m=gps_accuracy_m,
+                fixed_at=datetime.fromtimestamp(gps_fixed_at_ms / 1000, tz=KST),
+            )
+            rejection = fix_rejection(fix, now=now)
+            if rejection is None:
+                coords = station_repo.coords_for(conn, names)
+                proj = project_onto_route_detail(names, coords, lat, lng)
+                if proj.seg_idx is not None:
+                    current_seg_idx = proj.seg_idx
+                    position_source = "gps"
+                else:
+                    rejection = proj.rejection
+            if rejection is not None:
+                position_note = position_note_for(rejection)
 
     # 조회 범위 = 실효 시작 ~ 하차역 (D-17/D-18). 지나온 구간은 호출하지 않는다.
     # 시작은 **위치가 아니라 팔 수 있는 첫 구간**이다 (이슈 #35 → D-47). GPS 보정값도
@@ -252,6 +303,7 @@ async def get_matrix(
         stops=names,
         current_seg_idx=current_seg_idx,
         position_source=position_source,
+        position_note=position_note,
         delay_minutes=delay_minutes,
         board_at=board_at,
         alight_at=alight_at,
