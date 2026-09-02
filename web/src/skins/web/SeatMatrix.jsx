@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, cacheMatrix, readCachedMatrix } from "../../core/api";
+import {
+  acquireFix,
+  geoSupported,
+  gpsParams,
+  hasOptedIn,
+  positionBadge,
+  queryPermission,
+  setOptedIn,
+  shouldAutoAcquire,
+} from "../../core/geo";
 import {
   asOfLabel,
   buildRows,
@@ -61,39 +71,90 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   const [busy, setBusy] = useState(false);
   const [onlyClear, setOnlyClear] = useState(false);
   const [selected, setSelected] = useState(null);
+  // GPS 취득 상태 (D-59). 서버 position_source와 별개다 — 여기는 "브라우저에서 좌표를
+  // 얻는 데 성공했나"이고, 얻어 보냈어도 서버가 신선도/노선 이탈로 거부할 수 있다.
+  const [geoState, setGeoState] = useState(geoSupported() ? "idle" : "unsupported");
+  const permissionRef = useRef("unknown"); // 마운트 시 1회 조회
+  const lastGeoRef = useRef(null); // 이 세션의 마지막 취득 결과 — 자동 재시도 억제에 쓴다
 
-  const load = useCallback(async () => {
-    setBusy(true);
-    try {
-      const res = await api.matrix({
-        train_no: subscription.train_no,
-        date: subscription.date,
-        board_at: subscription.board_at,
-        alight_at: subscription.alight_at,
-        my_seat:
-          subscription.status === "SEATED"
-            ? `${subscription.my_car}-${subscription.my_seat_no}`
-            : undefined,
-      });
-      setData(res);
-      setStale(false);
-      setError(null);
-      cacheMatrix(res);
-    } catch (err) {
-      // 열차 안 회선 불안정 — 빈 화면 대신 캐시본을 보여준다 (PLAN 10절)
-      const cached = readCachedMatrix();
-      if (cached && cached.train_no === subscription.train_no) {
-        setData(cached);
-        setStale(true);
+  useEffect(() => {
+    let alive = true;
+    queryPermission().then((p) => {
+      if (alive) permissionRef.current = p;
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const load = useCallback(
+    async (prefetched = null) => {
+      setBusy(true);
+      // GPS는 이 한 번의 /matrix 조회에 동반해서만 얻는다 — 늦게 온 좌표로 두 번째
+      // 조회를 쏘지 않는다 (추가 조회 금지, 규칙 10 / D-13). 취득 실패는 화면을 막지 않는다.
+      let fix = prefetched;
+      if (
+        !fix &&
+        shouldAutoAcquire({
+          supported: geoSupported(),
+          permission: permissionRef.current,
+          optedIn: hasOptedIn(),
+          last: lastGeoRef.current,
+        })
+      ) {
+        setGeoState("acquiring");
+        const r = await acquireFix({ permission: permissionRef.current });
+        lastGeoRef.current = r.state;
+        setGeoState(r.state);
+        fix = r.fix;
       }
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }, [subscription]);
+      try {
+        const res = await api.matrix({
+          train_no: subscription.train_no,
+          date: subscription.date,
+          board_at: subscription.board_at,
+          alight_at: subscription.alight_at,
+          my_seat:
+            subscription.status === "SEATED"
+              ? `${subscription.my_car}-${subscription.my_seat_no}`
+              : undefined,
+          gps: gpsParams(fix),
+        });
+        setData(res);
+        setStale(false);
+        setError(null);
+        cacheMatrix(res);
+      } catch (err) {
+        // 열차 안 회선 불안정 — 빈 화면 대신 캐시본을 보여준다 (PLAN 10절)
+        const cached = readCachedMatrix();
+        if (cached && cached.train_no === subscription.train_no) {
+          setData(cached);
+          setStale(true);
+        }
+        setError(err.message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [subscription]
+  );
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  // 배지 탭 — iOS는 권한 프롬프트를 제스처 안에서만 띄운다 (D-21, push.js와 같은 규칙).
+  const enableGps = useCallback(async () => {
+    setGeoState("acquiring");
+    const r = await acquireFix({ viaTap: true, permission: permissionRef.current });
+    lastGeoRef.current = r.state;
+    setGeoState(r.state);
+    if (r.state === "ok") {
+      setOptedIn(true); // 이후 조회는 자동 시도
+      await load(r.fix); // 방금 얻은 좌표로 즉시 재조회 (↻와 같은 사용자 1회 조회)
+    } else if (r.state === "denied") {
+      setOptedIn(false);
+    }
   }, [load]);
 
   const transition = async (payload) => {
@@ -117,7 +178,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           <p style={st.dim}>{error ? `조회 실패: ${error}` : "좌석 정보를 불러오는 중…"}</p>
           {error && (
             <>
-              <button style={st.primaryBtn} onClick={load}>다시 시도</button>
+              <button style={st.primaryBtn} onClick={() => load()}>다시 시도</button>
               <div style={{ ...st.toggleRow, marginTop: 8 }}>
                 <button style={{ ...st.ghostBtn, flex: 1 }} onClick={onOpenSettings}>설정</button>
                 <button style={{ ...st.ghostBtn, flex: 1 }} onClick={onReset}>다른 열차</button>
@@ -130,6 +191,13 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
   }
 
   const { stops, seats, verdict, position_source, delay_minutes } = data;
+  // 위치 배지 한 벌은 core가 정한다 (D-59) — 두 스킨이 같은 사유·탭 규칙을 쓰도록
+  const posBadge = positionBadge({
+    geoState,
+    positionSource: position_source,
+    positionNote: data.position_note ?? null,
+    stale,
+  });
   const boardIdx = stops.indexOf(data.board_at);
   const alightIdx = stops.indexOf(data.alight_at);
   // 실효 시작 = max(팔 수 있는 첫 구간, board_idx) — 서버가 이미 적용해 verdict에 담아준다 (D-18/D-47).
@@ -188,9 +256,19 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
           <span style={{ ...st.pill, ...(seated ? st.pillSeated : st.pillStanding) }}>
             {seated ? "착석 중" : "입석 · 자리 찾는 중"}
           </span>
-          <span style={{ ...st.pill, ...(position_source === "gps" ? st.pillGps : st.pillEst) }}>
-            {position_source === "gps" ? "◉ GPS 실측 위치" : "시각표 추정 위치"}
-          </span>
+          {posBadge.tappable ? (
+            <button
+              type="button"
+              onClick={enableGps}
+              style={{ ...st.pill, ...(posBadge.gps ? st.pillGps : st.pillEst), cursor: "pointer", font: "inherit" }}
+            >
+              {posBadge.gps ? "◉ GPS 실측 위치" : "시각표 추정 위치 · 탭하여 GPS"}
+            </button>
+          ) : (
+            <span style={{ ...st.pill, ...(posBadge.gps ? st.pillGps : st.pillEst) }}>
+              {posBadge.gps ? "◉ GPS 실측 위치" : "시각표 추정 위치"}
+            </span>
+          )}
           {delay_minutes != null && delay_minutes > 0 && (
             <span style={{ ...st.pill, ...st.pillDelay }}>지연 {delay_minutes}분 반영</span>
           )}
@@ -198,6 +276,8 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
             {stale ? "⚠ 오프라인 캐시 · " : ""}{minutesAgo(data.fetched_at)} 조회
           </span>
         </div>
+        {/* GPS를 못 쓴 이유 · 켜는 안내 (D-59). 배지 색만으로 말하지 않는다 */}
+        {posBadge.note && <p style={{ ...st.nextPoll, margin: "4px 0 0" }}>{posBadge.note}</p>}
 
         {/* ── 노선 진행바 (매트릭스와 같은 범위 = 내 구간) ──
             전체 노선을 그리면 28정차 열차에서 역 이름이 뭉개진다. 인덱스는
@@ -316,7 +396,7 @@ export default function SeatMatrix({ subscription, onSubscriptionChange, onReset
               </>
             )}
           </span>
-          <button style={st.refreshBtn} title="지금 조회" onClick={load} disabled={busy}>↻</button>
+          <button style={st.refreshBtn} title="지금 조회" onClick={() => load()} disabled={busy}>↻</button>
         </div>
       </div>
 
