@@ -97,9 +97,11 @@ export const api = {
     request(`/api/subscriptions/${id}`, { method: "PATCH", body: payload }),
   deleteSubscription: (id) => request(`/api/subscriptions/${id}`, { method: "DELETE" }),
 
-  matrix: ({ train_no, date, board_at, alight_at, my_seat }) => {
+  // gps는 core/geo.js gpsParams() 결과다 — {} 이거나 4개 전부 (부분 전송 없음, D-30)
+  matrix: ({ train_no, date, board_at, alight_at, my_seat, gps }) => {
     const params = new URLSearchParams({ date, board_at, alight_at });
     if (my_seat) params.set("my_seat", my_seat);
+    for (const [k, v] of Object.entries(gps || {})) params.set(k, String(v));
     return request(`/api/trains/${train_no}/matrix?${params}`);
   },
 };
