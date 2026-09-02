@@ -48,7 +48,8 @@ CANNED["/matrix"] = {
   train_no: "1073", train_name: "ITX-마음", date: "2026-08-07",
   board_at: "수원", alight_at: "청량리", stops: STOPS,
   sub_status: "STANDING", current_seg_idx: 0, fetched_at: new Date(Date.now() - 120000).toISOString(),
-  position_source: "timetable", delay_minutes: null, failed_seg_idxs: [],
+  // 서버 리터럴과 맞춘다 — "schedule"|"gps" (D-59). position_note는 GPS 미사용 사유(없으면 null)
+  position_source: "schedule", position_note: null, delay_minutes: null, failed_seg_idxs: [],
   next_poll: { station: "안양", offset_min: 3 },
   seats: [
     { car: 4, seat_no: "12C", cells: [false, false, false, false] },
@@ -145,6 +146,11 @@ const LONGEST_MATRIX = {
 const mode = new URLSearchParams(location.search).get("state");
 const seatedMode = mode === "seated";
 
+// GPS 배지 상태 (D-59). `?state=gps` = 서버가 GPS로 판정, `?state=gpsnote` = 좌표를
+// 보냈으나 거부돼 사유가 붙은 상태. 배지·사유 문구를 눈으로 본다.
+const GPS_MATRIX = { ...CANNED["/matrix"], position_source: "gps", current_seg_idx: 1, position_note: null };
+const GPSNOTE_MATRIX = { ...CANNED["/matrix"], position_source: "schedule", position_note: "GPS 정확도 500m — 100m 초과" };
+
 window.fetch = async (url) => {
   const path = String(url).split("?")[0];
   const hit = Object.keys(CANNED).find((k) => path.endsWith(k));
@@ -154,6 +160,10 @@ window.fetch = async (url) => {
     ? LONG_MATRIX
     : mode === "longest"
     ? LONGEST_MATRIX
+    : mode === "gps"
+    ? GPS_MATRIX
+    : mode === "gpsnote"
+    ? GPSNOTE_MATRIX
     : CANNED["/matrix"];
   const body = hit === "/matrix" ? matrix : hit && CANNED[hit];
   return {
@@ -162,6 +172,20 @@ window.fetch = async (url) => {
     json: async () => (hit ? body : { detail: "preview" }),
   };
 };
+
+// `?geo=ok|denied|timeout` — geolocation을 결정적으로 스텁한다 (D-59). 프리뷰는 백엔드도
+// 권한 프롬프트도 없어야 하므로, 실제 navigator.geolocation을 부르면 헤드리스에서 멈춘다.
+const geoMode = new URLSearchParams(location.search).get("geo");
+if (geoMode) {
+  const stub = {
+    getCurrentPosition(ok, err) {
+      if (geoMode === "ok") ok({ coords: { latitude: 36.9, longitude: 127.1, accuracy: 20 }, timestamp: Date.now() });
+      else if (geoMode === "denied") err({ code: 1 });
+      else err({ code: 3 }); // timeout
+    },
+  };
+  Object.defineProperty(navigator, "geolocation", { value: stub, configurable: true });
+}
 
 const USER = {
   id: 1, // D-53. "나" 표시와 자기 삭제 금지가 이 값으로 갈린다

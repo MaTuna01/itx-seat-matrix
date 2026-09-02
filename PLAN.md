@@ -3,7 +3,7 @@
 > 개인용 프로젝트. 앱스토어/퍼블릭 배포 없이 사용.
 > 이 문서는 Claude Code로 구현할 때 컨텍스트로 사용한다.
 >
-> **문서 버전: v28**
+> **문서 버전: v29**
 > - v1: Spring Boot + Python 사이드카, 알림 봇 중심
 > - v2: Python 단일 스택으로 전환
 > - v3: 알림을 정식 목표로 승격, 계정(회원) 계층 도입
@@ -32,6 +32,7 @@
 > - v26: **즐겨찾기 노선 (D-56)** — Phase 1부터 잠자던 프리셋을 "즐겨찾기 노선" 칩으로 탑승 등록 화면에 노출한다. 계정당 5개, 상한은 프론트가 아니라 서버가 409로 지킨다. 판정·문구는 `core/favorites.js`가 한 번만 만든다
 > - v27: **갭 구간은 마지막 스냅샷으로 보여주고, 출발 -1분에 한 번 더 본다 (D-57)** — D-47이 옳게 조회를 끊은 구간이 화면에서도 통째로 사라졌다. 지금 타고 있는 구간 `[열차 위치, 판매 가능 시작)`은 마지막 성공 조회를 **표시 전용**으로 유지하고, 정차역당 폴을 2회→3회(-10/-4분 도착 + 출발 -1분)로 늘려 스냅샷 신선도를 확보한다. 판정·알림·추천은 D-47 그대로다
 > - v28: **정차역 캐시 자동 재적재 + 캐시 불일치 에러 매핑 (D-58, 이슈 #75/#76)** — 2026-09-01 코레일 개편으로 스테일 캐시가 실 장애를 냈다. D-29에서 "지금은 수동으로 충분"으로 유예했던 자동화를 붙였다: 06:05/12:05 KST + 기동 캐치업 + `reload_needed` 게이트. 저장 후 오래된 번호를 퍼지(`train_stop_max_age_days=7`)해 번호 재사용 충돌을 잘라낸다. `TrainStopsNotCached`가 `_compute_next_poll_at`에서 500으로 새던 버그를 봉쇄하고, 노선 불일치 문구를 정보 기준일과 함께 사용자용으로 통일했다
+> - v29: **GPS 위치 보정 프론트 연결 + 미사용 사유 노출 (D-59, 이슈 #81)** — D-30이 백엔드만 완성하고 Phase 2가 GPS를 브라우저에서 검증하지 않는 기준으로 닫혀, 프론트가 좌표를 한 번도 안 보내 실사용에서 항상 시각표 추정이었다(설계가 아니라 봉합선). `core/geo.js`로 위치를 취득해 `/matrix`에 첨부한다: **자동 시도 + 실패 시 배지 탭 폴백**(iOS는 제스처 안에서만 프롬프트, D-21), `watchPosition`·위치 폴링 없음(취득은 조회 1회에 동반). GPS를 못 쓴 이유(`position_note`)를 응답에 실어 GeoConfig 조정의 실사용 신호로 삼는다
 >
 > "왜 이렇게 했지?"가 궁금하면 [17. 결정 이력](#17-결정-이력-decision-log)을 먼저 읽을 것.
 > 방향을 튼 지점은 전부 거기에 이유와 함께 남겨두었다.
@@ -576,10 +577,16 @@ GET    /api/stations
 GET    /api/trains/search?date=&from=&to=&time=
        → 열차 목록 (열차번호 선택용). time = "이 시각 이후 출발" 하한 (HH:MM, → D-25)
 
-GET    /api/trains/{train_no}/matrix?date=&board_at=&alight_at=&my_seat=&lat=&lng=
+GET    /api/trains/{train_no}/matrix?date=&board_at=&alight_at=&my_seat=
+                                     &lat=&lng=&gps_accuracy_m=&gps_fixed_at_ms=
        → SeatMatrix + Verdict 통합 응답  ★ 프론트의 유일한 핵심 호출
        my_seat는 선택 (없으면 STANDING 관점 판정)
-       lat/lng는 선택. 있으면 current_seg_idx를 GPS 실측으로 보정 (→ D-13)
+       GPS 4개는 선택이되 **넷 다** 와야 보정한다 — 일부만 오면 신선도를 판단할 수
+       없어 시각표 추정을 그대로 둔다 (→ D-30). 있고 유효하면 current_seg_idx를 GPS
+       실측으로 덮어쓴다 (→ D-13). gps_fixed_at_ms는 epoch 밀리초(브라우저 timestamp)
+       응답: position_source = "schedule" | "gps"
+             position_note   = GPS를 보냈는데 쓰지 않은 이유(낡음/정확도/이탈/좌표없음/
+                               일부누락), 안 보냈거나 채택됐으면 null (→ D-59)
        조회 범위는 현재 구간~하차역 (→ 5절)
 
 GET    /api/presets      POST /api/presets      DELETE /api/presets/{id}
@@ -616,6 +623,7 @@ POST   /api/push/test                                    → 테스트 발송 �
   "stops": ["천안","평택","수원","안양","영등포","서울"],
   "current_seg_idx": 1,
   "position_source": "gps",
+  "position_note": null,
   "delay_minutes": 4,
   "seats": [
     { "car": 3, "seat_no": "7A", "cells": [true,true,true,false,false] }
@@ -850,7 +858,8 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - **web은 "동결"이 아니라 "기능 패리티 유지"다.** 동결이라 부르면 조용히 썩고, 정작 맥에서
   디버깅할 때 못 쓰게 된다. 배포 전 `?ui=web`으로 한 번 눈으로 본다
 - `core/format.js`는 `web/test/format.smoke.mjs`가 분기별 문자열로 고정한다 (`npm run smoke`).
-  프론트 자동 테스트가 0개인데 이 파일만은 **두 스킨이 같이 틀릴 수 있는 자리**라서 예외를 뒀다
+  프론트 자동 테스트가 0개인데 이 파일만은 **두 스킨이 같이 틀릴 수 있는 자리**라서 예외를 뒀다.
+  같은 이유로 `core/geo.js`(위치 정책·배지 문구)도 `web/test/geo.smoke.mjs`가 고정한다 (→ D-59)
 
 ### 탑승 상태 전이 UI (→ D-15)
 - 탑승 등록 시 **입석/착석 선택**, 착석이면 좌석 지정
@@ -898,6 +907,12 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - 안전장치: GPS가 노선(선분)에서 일정 거리 이상 벗어나면(탑승 전/하차 후 등) 무시하고 추정값 사용
 - **신선도 안전장치 (v7 → D-21)**: Geolocation 좌표의 timestamp/accuracy를 함께 전송 —
   **30초 이상 낡았거나 정확도 반경이 과대하면 무시**하고 추정값 사용 (임계값은 설정으로 격리)
+- **취득 정책 (v29 → D-59)**: 좌표는 `/matrix` 조회에 **동반해서만** 얻는다
+  (`core/geo.js`, timeout 4초 / maximumAge 15초) — `watchPosition`이나 위치 폴링으로
+  매트릭스를 다시 부르지 않는다(추가 조회 금지, 10절). 권한이 있으면 매 조회에 자동
+  시도하고, 자동 시도가 실패/무응답이면 배지를 눌러 **제스처 안에서** 권한을 요청한다
+  (푸시와 같은 iOS 제약, D-21). 못 쓴 이유는 `position_note`로 배지 옆에 노출한다 —
+  조용한 폴백이 GeoConfig 조정을 막았던 것을 푼다(색만으로 말하지 않는다)
 
 ### 열차 안 네트워크 대응 (실사용 필수)
 열차 내부는 회선이 자주 끊긴다.
@@ -937,7 +952,8 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - 역 정적 데이터 적재 (station 테이블) — **용도 2개**: GPS 보정 좌표 + 역 선택 드롭다운 소스.
   Phase 1이 만든 열차 선택 화면의 데이터 소스를 여기로 갈아끼운다 (→ D-25).
   **출처 검증이 선행 과제**: korail2 공개 API에 역 목록이 없다(Phase 0 감사) → 공공데이터포털 등 외부 소스
-- 선분 투영 구간 판정 (GPS 보정)
+- 선분 투영 구간 판정 (GPS 보정) — *단, 완료 기준이 GPS를 브라우저에서 검증하지
+  않아 프론트 연결(좌표 취득·전송)이 빠진 채 Phase가 닫혔다. v29/D-59에서 연결(이슈 #81)*
 - ✅ 완료 기준: 실제 열차번호로 매트릭스 조회 성공
   → **2026-08-06 달성.** `ADAPTER=korail2`로 설정 화면에서 실 계정 연결 → 열차 검색 →
   구독 등록 → 좌석 매트릭스 렌더까지 브라우저에서 관통 확인. pytest 279 통과.
@@ -1007,7 +1023,9 @@ APScheduler는 인프로세스라 잡 상태가 메모리에 있다. 출근 시�
 - 2회 이동 조합 추천
 - 좌석 점유 이력 저장 → "이 시간대 이 열차는 어느 호차가 잘 빈다" 통계
 - **실사용 몇 주 후 조정 예정 항목** (설정값으로 격리해둔 손잡이들, → D-17):
-  추천 랭킹 가중치 / `min_extension_segments` / `SEATS_AVAILABLE` 다이제스트 상세도
+  추천 랭킹 가중치 / `min_extension_segments` / `SEATS_AVAILABLE` 다이제스트 상세도 /
+  **`GeoConfig`**(신선도 30초 · 정확도 100m · 노선 이탈 300m) — 조정 신호는
+  `/matrix`의 `position_note`가 준다 (→ D-59). D-30이 남긴 후속을 여기서 되살린다
 - **관리자 복구 수단** (→ D-24 후속). 가입이 잠긴 채 관리자 계정을 잃거나 첫 계정이
   엉뚱하게 점유되면 **앱에서 풀 방법이 없다** — 로그인도 가입(403)도 막히고 DB 직접 수정만 남는다.
   Phase 1 개발 중 실제로 겪었다(브라우저 검증용 계정이 첫 계정=관리자 자리를 차지).
@@ -1350,7 +1368,8 @@ itx-seat-matrix/
     │   ├── sw.js             # 푸시 수신 + 딥링크 + 오프라인 셸 (/api는 캐시 금지)
     │   └── icon-*.png        # scripts/gen_icons.py 생성
     ├── test/
-    │   └── format.smoke.mjs  # core/format.js 분기 고정 (`npm run smoke`, 의존성 없음)
+    │   ├── format.smoke.mjs  # core/format.js 분기 고정 (`npm run smoke`, 의존성 없음)
+    │   └── geo.smoke.mjs     # core/geo.js 위치 정책·문구 고정 (D-59)
     ├── preview.html          # 개발 전용 화면 프리뷰 — 빌드에 포함되지 않는다 (vite 엔트리는 index.html뿐)
     └── src/                  # 3층: 라우팅 / core / 스킨 (→ D-50)
         ├── App.jsx           # 라우팅·세션·딥링크. **스킨을 모른다**
@@ -1359,6 +1378,7 @@ itx-seat-matrix/
         │   ├── admin.js      # 삭제 가능 판정 — 두 스킨이 갈리지 않게 한 벌만 (D-53)
         │   ├── push.js       # 구독. 권한 요청은 버튼 탭 핸들러에서만 (D-21)
         │   ├── format.js     # ★ 판정 문구·행 순서. 두 스킨의 유일한 원천
+        │   ├── geo.js        # 위치 취득·파라미터·배지 문구. 자동 시도 + 탭 폴백 (D-59)
         │   └── skin.js       # UA 판별 + `?ui=` 강제 + localStorage 고정
         ├── preview.jsx       # 개발 전용. 백엔드 없이 스킨 화면 하나만 렌더한다
         └── skins/
@@ -3653,3 +3673,60 @@ station·train_stop 캐시(D-29 — 소스 CSV는 `data/`가 gitignore)가 들�
 
 **범위 밖**: 프론트 문구(서버 detail이 그대로 `err.message`로 렌더되므로 프론트 무변경),
 새 알림 종류(5종 불변, 규칙 6), 실 API 재적재 검증(fixture/스텁만 — 규칙 10).
+
+---
+
+### D-59. GPS 위치 보정 프론트 연결 + 미사용 사유 노출 *(v29, 이슈 #81)*
+
+**문제 (조용한 봉합선)**: 매트릭스의 "현재 구간"은 D-13/D-30 설계상 시각표 추정을
+기본으로 하되 앱을 연 순간 폰 GPS로 덮어써야 한다. 그런데 실사용에서 `position_source`가
+**항상 `"schedule"`**이었다. 원인은 결정이 아니라 누락이다:
+
+1. D-30이 백엔드(`/matrix`의 GPS 4개 파라미터, `domain/geo.py` 선분 투영, 28 테스트)를
+   완성하고 "구현 완료"로 닫았다. **프론트에서 좌표를 얻어 보내는 반쪽**은 어떤 D-항목·
+   이슈·TODO에도 등장한 적이 없다 — `web/` 전체에 `navigator.geolocation`이 0건이었다.
+2. Phase 2 완료 기준이 "실제 열차번호로 매트릭스 조회 성공"뿐이라 GPS를 브라우저에서
+   한 번도 눌러보지 않고 ✅ 처리됐다. 두 반쪽이 만나야 하는 자리에 아무도 서 있지 않았다.
+3. 침묵을 굳힌 메커니즘: D-30의 "넷 다 없으면 시각표(안전한 방향)" — 0개를 보내니 영구
+   침묵 폴백. 게다가 7절 스키마가 `lat/lng` 둘만 적어 D-30의 4개 규칙과도 어긋나 있었다.
+
+**결정**:
+
+1. **클라이언트 취득 정책 — `web/src/core/geo.js` 신설**. 좌표는 `/matrix` 조회에
+   **동반해서만** 얻는다(순차, `GEO_TIMEOUT_MS=4000`으로 상한). `watchPosition`이나 위치
+   폴링으로 매트릭스를 다시 부르지 않는다 — 늦게 온 좌표로 두 번째 `/matrix`를 쏘면 추가
+   조회다(규칙 10 / D-13). 권한이 있거나 사용자가 한 번 켰으면(`itx.geo.optin`) 매 조회에
+   자동 시도하고, 자동 시도가 실패/무응답이면 배지를 눌러 **제스처 안에서** 권한을
+   요청한다(iOS는 그때만 프롬프트가 뜬다, D-21 푸시와 동일). `shouldAutoAcquire`가 언제
+   자동 시도할지, `classifyError`가 iOS의 "프롬프트 없이 조용히 죽은 code 1"과 진짜 거부를
+   가른다 — 전자는 `prompt`(탭 유도), 후자만 `denied`(설정 안내). 순수 함수는
+   `web/test/geo.smoke.mjs`가 고정한다.
+2. **미사용 사유 노출 — `position_note`**. GPS를 보냈는데 안 쓴 이유(일부 누락 / 낡음 /
+   정확도 / 노선 이탈 / 좌표 없음)를 응답에 실어 배지 옆 작은 글씨로 보여준다. 도메인은
+   `GeoRejection(reason, value, limit)`으로 관측값+임계값을 구조화하고(`fix_rejection`,
+   `project_onto_route_detail`), api 계층(`app/api/trains.py`)이 한국어 문구로 바꾼다
+   (선례: `stops_error_detail`, D-58). 기존 `is_fix_usable`/`project_onto_route`는 얇은
+   래퍼로 남겨 D-30의 22개 테스트를 무변경 통과시켰다.
+3. **`position_note`가 GeoConfig 조정 신호다**. D-30이 "수치는 Phase 4 조정 대상"이라
+   적어두고 정작 Phase 4 목록에서 빠졌던 `GeoConfig`(30초·100m·300m)를 되살렸다.
+   조용한 폴백이던 거부가 이제 화면·관측값으로 드러나므로, 실사용 분포를 보고 임계값을
+   조정할 수 있다. **이번 작업에서 GeoConfig 값은 바꾸지 않는다** — 신호가 쌓인 뒤 Phase 4.
+
+**사유 → 문구 어휘** (도메인 상수 → api 한국어):
+
+| reason | 관측/임계 | 문구 |
+|---|---|---|
+| (api) 일부 누락 | — | `GPS 값 일부 누락 — 시각표 추정 사용` |
+| `stale` | 나이초/30 | `GPS 60초 전 값 — 30초 초과` |
+| `future` | 나이<0 | `GPS 시각이 기기 시계보다 앞섬 — 시계 오차` |
+| `inaccurate` | 정확도m/100 | `GPS 정확도 500m — 100m 초과` |
+| `off_route` | 거리m/300 | `노선에서 1.2km 떨어짐 — 300m 초과` |
+| `no_coords` | — | `이 구간 역 좌표 없음` |
+
+**설정** (매직 넘버 인라인 금지, D-17): 클라이언트 `GEO_TIMEOUT_MS=4000`·
+`GEO_MAX_AGE_MS=15000`·opt-in 키 `itx.geo.optin`은 `core/geo.js`에, 서버 임계값은
+`domain/geo.py`의 `GeoConfig`에. 클라이언트에 서버 임계값을 복제하지 않는다(드리프트 방지).
+
+**범위 밖**: `watchPosition`·위치 폴링·`visibilitychange` 재조회(추가 조회 금지),
+스케줄러 GPS(서버엔 기기 위치가 없다 — D-13 불변), 지도/좌표 표시 UI, 클라이언트
+측 임계값 중복, 새 알림 종류(5종 불변), GeoConfig 값 변경(신호가 쌓인 뒤 Phase 4).

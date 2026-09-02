@@ -23,6 +23,14 @@ from datetime import datetime, timedelta
 
 EARTH_RADIUS_M = 6_371_000.0
 
+# GPS를 안 쓴 이유의 고정 어휘 (D-59). 도메인은 사용자 문구를 모른다 —
+# api 계층(`app/api/trains.py`)이 이 값을 한국어 `position_note`로 바꾼다.
+REJECT_STALE = "stale"  # 좌표가 max_fix_age_seconds보다 낡음
+REJECT_FUTURE = "future"  # fixed_at > now (기기 시계 오차)
+REJECT_INACCURATE = "inaccurate"  # accuracy_m > max_accuracy_m
+REJECT_NO_COORDS = "no_coords"  # 양 끝 좌표를 가진 인접 구간이 하나도 없음
+REJECT_OFF_ROUTE = "off_route"  # 최근접 구간이 max_route_distance_m보다 멂 (탑승 전/하차 후)
+
 
 @dataclass(frozen=True)
 class GeoConfig:
@@ -49,20 +57,47 @@ class GeoFix:
     fixed_at: datetime  # 좌표를 측정한 시각 (KST aware)
 
 
-def is_fix_usable(fix: GeoFix, *, now: datetime, config: GeoConfig = DEFAULT_GEO) -> bool:
-    """신선도 안전장치 (D-21) — 낡았거나 부정확하면 좌표를 아예 쓰지 않는다.
+@dataclass(frozen=True)
+class GeoRejection:
+    """좌표를 안 쓴 이유 + 관측값/임계값 (D-59).
 
-    `now`는 인자로 받는다 (D-21 공통 구현 규칙, 테스트 가능성).
+    `value`(관측: 나이 초 / 정확도 m / 이탈 거리 m)와 `limit`(비교한 임계값)이
+    쌍으로 있어야 실사용 분포를 보고 GeoConfig를 조정할 수 있다 (D-30이 남긴 Phase 4 신호).
+    `no_coords`는 관측할 수치가 없어 둘 다 None.
+    """
+
+    reason: str
+    value: float | None = None
+    limit: float | None = None
+
+
+def fix_rejection(
+    fix: GeoFix, *, now: datetime, config: GeoConfig = DEFAULT_GEO
+) -> GeoRejection | None:
+    """신선도 검사 (D-21) — 문제가 있으면 사유를, 없으면 None. 검사 순서는 고정이다
+    (future → stale → inaccurate): 같은 좌표가 여러 조건을 어겨도 첫 사유만 보고한다.
     """
     if fix.fixed_at.tzinfo is None or now.tzinfo is None:
         raise ValueError("naive datetime은 허용하지 않는다 (KST aware 필수, PLAN 3절)")
     age = now - fix.fixed_at
+    age_s = age.total_seconds()
     if age < timedelta(0):
         # 시계 오차로 미래 시각이 와도 "낡음"과 같은 방향으로 안전하게 거부한다
-        return False
+        return GeoRejection(REJECT_FUTURE, value=age_s, limit=0.0)
     if age > timedelta(seconds=config.max_fix_age_seconds):
-        return False
-    return fix.accuracy_m <= config.max_accuracy_m
+        return GeoRejection(REJECT_STALE, value=age_s, limit=config.max_fix_age_seconds)
+    if fix.accuracy_m > config.max_accuracy_m:
+        return GeoRejection(REJECT_INACCURATE, value=fix.accuracy_m, limit=config.max_accuracy_m)
+    return None
+
+
+def is_fix_usable(fix: GeoFix, *, now: datetime, config: GeoConfig = DEFAULT_GEO) -> bool:
+    """신선도 안전장치 (D-21) — 낡았거나 부정확하면 좌표를 아예 쓰지 않는다.
+
+    `now`는 인자로 받는다 (D-21 공통 구현 규칙, 테스트 가능성).
+    사유가 필요하면 `fix_rejection`을 쓴다 — 이 함수는 그 얇은 불리언 래퍼다.
+    """
+    return fix_rejection(fix, now=now, config=config) is None
 
 
 def _to_plane(lat: float, lng: float, ref_lat: float) -> tuple[float, float]:
@@ -91,22 +126,35 @@ def _point_segment_distance_m(
     return math.hypot(px - closest_x, py - closest_y)
 
 
-def project_onto_route(
+@dataclass(frozen=True)
+class RouteProjection:
+    """선분 투영 결과 (D-59).
+
+    성공(`seg_idx is not None`)해도 `distance_m`를 채운다 — 300m 이탈 임계값을
+    실사용 분포로 조정하려면 "성공했지만 얼마나 아슬아슬했나"가 필요하다.
+    실패면 `rejection`으로 이유를 준다.
+    """
+
+    seg_idx: int | None
+    distance_m: float | None
+    rejection: GeoRejection | None
+
+
+def project_onto_route_detail(
     stops: list[str],
     station_coords: dict[str, tuple[float, float]],
     lat: float,
     lng: float,
     *,
     config: GeoConfig = DEFAULT_GEO,
-) -> int | None:
-    """GPS 좌표를 `stops`의 인접 구간 선분들에 투영해 가장 가까운 구간 인덱스를 낸다.
+) -> RouteProjection:
+    """GPS 좌표를 `stops`의 인접 구간 선분들에 투영한다. 사유·거리까지 돌려주는 상세판.
 
     후보는 **양 끝 역 모두 좌표를 가진 구간**으로 한정한다 — 한쪽이라도 좌표가
-    없으면 그 구간은 판정에서 제외한다(조용히 틀린 구간을 고르지 않는다).
-    모든 후보 구간이 `max_route_distance_m`보다 멀면(탑승 전/하차 후 등) `None` —
-    호출부가 시각표 추정으로 폴백해야 한다.
+    없으면 그 구간은 판정에서 제외한다(조용히 틀린 구간을 고르지 않는다). 후보가
+    하나도 없으면 `no_coords`, 최근접이 `max_route_distance_m`보다 멀면 `off_route`.
 
-    반환값은 `stops` 전체 노선 기준 구간 인덱스다 (D-18 인덱스 규칙과 동일 기준).
+    반환 인덱스는 `stops` 전체 노선 기준이다 (D-18 인덱스 규칙과 동일 기준).
     """
     candidates: list[tuple[float, int]] = []
     for i, (frm, to) in enumerate(zip(stops, stops[1:])):
@@ -122,8 +170,24 @@ def project_onto_route(
         candidates.append((distance, i))
 
     if not candidates:
-        return None
+        return RouteProjection(seg_idx=None, distance_m=None, rejection=GeoRejection(REJECT_NO_COORDS))
     best_distance, best_idx = min(candidates, key=lambda c: c[0])
     if best_distance > config.max_route_distance_m:
-        return None
-    return best_idx
+        return RouteProjection(
+            seg_idx=None,
+            distance_m=best_distance,
+            rejection=GeoRejection(REJECT_OFF_ROUTE, value=best_distance, limit=config.max_route_distance_m),
+        )
+    return RouteProjection(seg_idx=best_idx, distance_m=best_distance, rejection=None)
+
+
+def project_onto_route(
+    stops: list[str],
+    station_coords: dict[str, tuple[float, float]],
+    lat: float,
+    lng: float,
+    *,
+    config: GeoConfig = DEFAULT_GEO,
+) -> int | None:
+    """가장 가까운 구간 인덱스만 필요한 호출부용 얇은 래퍼. 사유·거리는 `project_onto_route_detail`."""
+    return project_onto_route_detail(stops, station_coords, lat, lng, config=config).seg_idx

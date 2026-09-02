@@ -9,7 +9,8 @@
 
 // v2: 판정 요약에 지연 착석 그룹이 추가됐다 (D-46). 올리지 않으면 홈화면 PWA가
 // 앱을 완전히 종료할 때까지 옛 화면을 계속 보여준다.
-const CACHE = "itx-shell-v7";
+// v8: 위치 배지 탭 → GPS 권한 흐름 (D-59). 새 상호작용이 설치된 PWA에 실제로 내려가야 한다.
+const CACHE = "itx-shell-v8";
 const SHELL = "/";
 
 self.addEventListener("install", (event) => {
