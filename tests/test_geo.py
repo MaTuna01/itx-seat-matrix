@@ -14,12 +14,19 @@ import pytest
 
 from app.domain.geo import (
     DEFAULT_GEO,
+    REJECT_FUTURE,
+    REJECT_INACCURATE,
+    REJECT_NO_COORDS,
+    REJECT_OFF_ROUTE,
+    REJECT_STALE,
     GeoConfig,
     GeoFix,
     _point_segment_distance_m,
     _to_plane,
+    fix_rejection,
     is_fix_usable,
     project_onto_route,
+    project_onto_route_detail,
 )
 from app.domain.models import KST
 
@@ -81,6 +88,79 @@ def test_custom_config_thresholds() -> None:
     strict = GeoConfig(max_fix_age_seconds=5.0, max_accuracy_m=10.0)
     assert is_fix_usable(fix(age_seconds=10), now=NOW, config=strict) is False
     assert is_fix_usable(fix(age_seconds=3, accuracy_m=8), now=NOW, config=strict) is True
+
+
+# ── 거부 사유 구조화 (D-59) ──────────────────────────────────────────────
+def test_fix_rejection_none_when_usable() -> None:
+    assert fix_rejection(fix(age_seconds=5, accuracy_m=15), now=NOW) is None
+
+
+def test_fix_rejection_stale_reports_age_and_limit() -> None:
+    rej = fix_rejection(fix(age_seconds=31), now=NOW)
+    assert rej is not None
+    assert rej.reason == REJECT_STALE
+    assert rej.value == pytest.approx(31.0)
+    assert rej.limit == 30.0
+
+
+def test_fix_rejection_future_reports_negative_age() -> None:
+    rej = fix_rejection(fix(age_seconds=-5), now=NOW)
+    assert rej is not None
+    assert rej.reason == REJECT_FUTURE
+    assert rej.value is not None and rej.value < 0
+
+
+def test_fix_rejection_inaccurate_reports_accuracy() -> None:
+    rej = fix_rejection(fix(accuracy_m=150), now=NOW)
+    assert rej is not None
+    assert rej.reason == REJECT_INACCURATE
+    assert rej.value == pytest.approx(150.0)
+    assert rej.limit == 100.0
+
+
+def test_fix_rejection_checks_age_before_accuracy() -> None:
+    """낡음과 부정확이 동시면 검사 순서대로 stale이 먼저 보고된다 (기존 로직 순서 유지)."""
+    rej = fix_rejection(fix(age_seconds=31, accuracy_m=150), now=NOW)
+    assert rej is not None and rej.reason == REJECT_STALE
+
+
+def test_is_fix_usable_equals_fix_rejection_is_none() -> None:
+    for f in (fix(age_seconds=5), fix(age_seconds=31), fix(accuracy_m=150), fix(age_seconds=-5)):
+        assert is_fix_usable(f, now=NOW) == (fix_rejection(f, now=NOW) is None)
+
+
+# ── 투영 상세 (거리·사유) ────────────────────────────────────────────────
+def test_project_detail_success_carries_distance() -> None:
+    lat, lng = _midpoint(CHEONAN, PYEONGTAEK)
+    proj = project_onto_route_detail(STOPS, COORDS, lat, lng)
+    assert proj.seg_idx == 0
+    assert proj.rejection is None
+    assert proj.distance_m is not None and proj.distance_m < 300
+
+
+def test_project_detail_off_route_reports_best_distance_and_limit() -> None:
+    proj = project_onto_route_detail(STOPS, COORDS, *BUSAN)
+    assert proj.seg_idx is None
+    assert proj.rejection is not None
+    assert proj.rejection.reason == REJECT_OFF_ROUTE
+    assert proj.rejection.value is not None and proj.rejection.value > 300
+    assert proj.rejection.limit == 300.0
+    assert proj.distance_m == proj.rejection.value  # 실패해도 최근접 거리는 채운다
+
+
+def test_project_detail_no_coords() -> None:
+    for coords in ({}, {"천안": CHEONAN, "수원": SUWON}):  # 빈 사전 · 평택 빠져 후보 0개
+        proj = project_onto_route_detail(STOPS, coords, *CHEONAN)
+        assert proj.seg_idx is None
+        assert proj.rejection is not None and proj.rejection.reason == REJECT_NO_COORDS
+        assert proj.rejection.value is None and proj.rejection.limit is None
+
+
+def test_project_onto_route_is_detail_seg_idx() -> None:
+    lat, lng = _midpoint(PYEONGTAEK, SUWON)
+    assert project_onto_route(STOPS, COORDS, lat, lng) == project_onto_route_detail(
+        STOPS, COORDS, lat, lng
+    ).seg_idx
 
 
 # ── 평면 투영 헬퍼 (기하 오류가 조용히 나기 쉬운 지점) ───────────────────
