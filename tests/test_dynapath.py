@@ -2,22 +2,22 @@
 
 **여기서 검증할 수 없는 것**: 생성된 토큰을 코레일이 실제로 받아주는지.
 그건 실호출로만 확인되며 `ADAPTER=korail2` 실연동 검증의 몫이다.
-여기서는 이식이 구조적으로 깨지지 않았는지와, pycryptodome → cryptography
-치환이 **바이트 동일**한지를 본다 (후자는 순환 논리가 아닌 실제 검증이다).
+여기서는 이식이 구조적으로 깨지지 않았는지를 본다.
+
+익명 전환(D-60) 이후 이 모듈이 하는 일은 **토큰 헤더 부착 하나**다. `Sid`·로그인
+`Version` 덮어쓰기·GET→POST 전환은 전부 로그인 경로 전용이라 함께 사라졌다 —
+그래서 그 세 가지를 지키던 테스트도 없다. 대신 **research.* 에 토큰이 붙는지**가
+새 관문이다 (익명 경로에서는 토큰이 곧 통행증이다).
 """
 
 from __future__ import annotations
 
-import base64
-
 import pytest
 
 from app.adapters.korail_dynapath import (
-    APP_VERSION,
     DYNAPATH_PATHS,
     DynaPathSession,
     _DynaPathTokenEngine,
-    _generate_sid,
 )
 
 FIXED_TS = 1_754_300_000_000
@@ -29,31 +29,6 @@ DEVICE_ID = "558a4f02041657ea"
 @pytest.fixture
 def engine() -> _DynaPathTokenEngine:
     return _DynaPathTokenEngine(app_start_ts=FIXED_START)
-
-
-# ── Sid: 원본(pycryptodome)과 바이트 동일한가 ────────────────────────────
-def test_sid_matches_pycryptodome_reference() -> None:
-    """원본은 `Crypto.Cipher.AES`를 쓴다. 우리는 `cryptography`로 바꿨다.
-
-    korail2가 pycryptodome을 끌고 오므로 여기서 원본 구현을 직접 돌려 대조할 수 있다.
-    두 산출이 다르면 우회가 조용히 깨진다 — 실호출 전에 잡아야 하는 지점.
-    """
-    from Crypto.Cipher import AES  # noqa: PLC0415 — 대조용 (전이 의존, 런타임 코드는 안 쓴다)
-    from Crypto.Util.Padding import pad  # noqa: PLC0415
-
-    key = b"2485dd54d9deaa36"
-    plaintext = f"AD{FIXED_TS}".encode()
-    cipher = AES.new(key, AES.MODE_CBC, iv=key)
-    expected = base64.b64encode(cipher.encrypt(pad(plaintext, 16))).decode() + "\n"
-
-    assert _generate_sid(FIXED_TS) == expected
-
-
-def test_sid_is_base64_with_trailing_newline() -> None:
-    sid = _generate_sid(FIXED_TS)
-    assert sid.endswith("\n")
-    raw = base64.b64decode(sid.strip())
-    assert len(raw) % 16 == 0  # AES 블록 배수
 
 
 # ── 토큰 생성 ────────────────────────────────────────────────────────────
@@ -94,7 +69,7 @@ def test_encode_normal_be_length_formula(engine: _DynaPathTokenEngine) -> None:
         assert len(engine.encode_normal_be(text, engine.TABLE)) == expected
 
 
-# ── 세션: 4가지 변경이 HTTP 계층에서 적용되는가 ──────────────────────────
+# ── 세션: 토큰 부착이 HTTP 계층에서 적용되는가 ───────────────────────────
 class _Captured(Exception):
     """super().request()까지 도달한 인자를 잡아 네트워크로 나가기 전에 멈춘다."""
 
@@ -113,8 +88,11 @@ def session(monkeypatch: pytest.MonkeyPatch) -> DynaPathSession:
     return DynaPathSession()
 
 
-LOGIN_URL = "https://smart.letskorail.com:443/classes/com.korail.mobile.login.Login"
 SCHEDULE_URL = "https://smart.letskorail.com:443/classes/com.korail.mobile.seatMovie.ScheduleView"
+CARS_URL = "https://smart.letskorail.com:443/classes/com.korail.mobile.research.TrainResearch"
+SEATS_URL = (
+    "https://smart.letskorail.com:443/classes/com.korail.mobile.research.ResidualSeatsResearch.do"
+)
 TICKETS_URL = "https://smart.letskorail.com:443/classes/com.korail.mobile.myTicket.MyTicketList"
 
 
@@ -124,40 +102,42 @@ def _capture(session: DynaPathSession, method: str, url: str, **kwargs) -> _Capt
     return exc.value
 
 
-def test_dynapath_path_gets_token_header_and_sid(session: DynaPathSession) -> None:
-    cap = _capture(session, "POST", LOGIN_URL, data={"Device": "AD", "Version": "231231001"})
+@pytest.mark.parametrize("url", [SCHEDULE_URL, CARS_URL, SEATS_URL])
+def test_all_three_queries_get_the_token(session: DynaPathSession, url: str) -> None:
+    """익명 경로에서는 토큰이 곧 통행증이다 — 조회 3종 전부에 붙어야 한다 (D-60)."""
+    cap = _capture(session, "POST", url, data={"Device": "AD"})
     assert cap.kwargs["headers"]["x-dynapath-m-token"].startswith("bEeEP")
-    assert cap.kwargs["data"]["Sid"].endswith("\n")
 
 
-def test_login_hardcoded_version_is_overridden(session: DynaPathSession) -> None:
-    """korail2 login()은 Version='231231001'을 하드코딩한다 (설치본 line 637)."""
-    cap = _capture(session, "POST", LOGIN_URL, data={"Version": "231231001"})
-    assert cap.kwargs["data"]["Version"] == APP_VERSION
+def test_sid_is_never_sent(session: DynaPathSession) -> None:
+    """익명 경로는 `Sid`를 요구하지 않는다. 본문에도 쿼리에도 섞이면 안 된다.
+
+    로그인 시절의 잔재가 되살아나면 인증 경로처럼 보여 다시 막힐 수 있다 (D-60).
+    """
+    cap = _capture(session, "POST", SCHEDULE_URL, params={"Device": "AD"}, data=None)
+    assert "Sid" not in (cap.kwargs.get("params") or {})
+    assert not (cap.kwargs.get("data") or {})
 
 
-def test_schedule_view_get_is_converted_to_post(session: DynaPathSession) -> None:
-    """korail2 search_train()은 GET으로 부른다. 우회 후에는 POST여야 한다."""
-    cap = _capture(session, "GET", SCHEDULE_URL, params={"Version": "190617001"})
-    assert cap.method == "POST"
-    assert cap.kwargs["params"]["Version"] == APP_VERSION  # params 쪽도 최신화
+def test_method_is_passed_through(session: DynaPathSession) -> None:
+    """GET→POST 전환은 사라졌다 — 호출부가 명시한 메서드가 그대로 나가야 한다."""
+    assert _capture(session, "GET", SCHEDULE_URL).method == "GET"
+    assert _capture(session, "POST", SCHEDULE_URL).method == "POST"
 
 
 def test_non_dynapath_path_gets_no_token(session: DynaPathSession) -> None:
-    """좌석맵(research.*)을 포함한 나머지 경로는 토큰 없이 인증 세션만으로 간다.
-
-    Phase 0 실측 결과이자 DYNAPATH_PATHS 목록의 의미다 — 여기가 틀리면
-    불필요한 헤더를 코레일에 흘리게 된다.
-    """
+    """목록 밖 경로에는 헤더를 흘리지 않는다."""
     cap = _capture(session, "GET", TICKETS_URL, data={"Device": "AD"})
     assert "x-dynapath-m-token" not in (cap.kwargs.get("headers") or {})
-    assert "Sid" not in cap.kwargs["data"]
-    assert cap.method == "GET"
 
 
-def test_seatmap_endpoints_are_not_in_dynapath_paths() -> None:
-    for path in DYNAPATH_PATHS:
-        assert "research" not in path
+def test_seatmap_endpoints_are_in_dynapath_paths() -> None:
+    """D-60 이전에는 반대였다 (`research.*`는 인증 세션으로만 갔다).
+
+    익명 전환으로 뒤집혔다. 이 목록에서 빠지면 2·3단계가 조용히 토큰 없이 나간다.
+    """
+    assert any("research.TrainResearch" in p for p in DYNAPATH_PATHS)
+    assert any("research.ResidualSeatsResearch" in p for p in DYNAPATH_PATHS)
 
 
 def test_user_agent_is_the_updated_one(session: DynaPathSession) -> None:
