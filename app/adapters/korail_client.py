@@ -99,6 +99,32 @@ def looks_sold_out(msg_cd: str, msg_txt: str) -> bool:
     return any(hint in msg_txt for hint in SOLD_OUT_HINTS)
 
 
+def blocked_reason(response: Any) -> str | None:
+    """거부 응답에서 **사용자에게 보여줄 한 문장**만 꺼낸다. 없으면 None.
+
+    코레일은 차단 사유를 JSON으로 알려준다 (2026-09-15 실측):
+
+        {"code":-8202,"message":"VPN 또는 데이터센터를 통해서는 서비스를 이용할 수 없습니다."}
+
+    이 문장이 화면까지 가야 한다. 그날 로그에는 `403`만 남아서, 정작 코레일이
+    답을 주고 있었는데도 원인을 찾는 데 하루를 썼다 (D-60).
+
+    **짧고 사람이 읽을 수 있을 때만** 쓴다 — WAF의 HTML 차단 페이지를 UI에
+    쏟아붓지 않기 위해서다. 판별이 안 되면 None을 주고 일반 문구로 떨어진다.
+    """
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 — JSON이 아니면 그냥 사유가 없는 것이다
+        return None
+    if not isinstance(body, dict):
+        return None
+    message = str(body.get("message") or "").strip()
+    if not message or len(message) > 200 or "<" in message:
+        return None
+    code = body.get("code")
+    return f"{message} (코레일 코드 {code})" if code is not None else message
+
+
 class KorailBlocked(KorailApiError):
     """안티봇에 막혔다. **두 얼굴이 있다** (→ D-60).
 
@@ -111,18 +137,28 @@ class KorailBlocked(KorailApiError):
     고칠 곳은 보통 `korail_dynapath.py` 하나다 (D-22).
     """
 
+    def __init__(self, msg_cd: str, msg_txt: str, *, reason: str | None = None) -> None:
+        super().__init__(msg_cd, msg_txt)
+        # 화면에 그대로 띄워도 되는 짧은 사유. 코레일이 JSON으로 알려줄 때만 채워진다.
+        self.reason = reason
+
     @classmethod
     def from_http(cls, exc: requests.HTTPError) -> KorailBlocked:
         """`raise_for_status()`의 예외 → 원인 추적이 가능한 형태로.
 
         응답 본문을 버리지 않는다 — 2026-09-15에는 로그에 `403`밖에 남지 않아
-        원인(토큰이냐 경로냐)을 가리는 데 실측 호출이 따로 필요했다.
+        원인을 가리는 데 실측 호출이 따로 필요했고, **정작 답은 본문에 있었다**
+        (`-8202 VPN 또는 데이터센터…`, D-60).
         """
         response = exc.response
         status = getattr(response, "status_code", "?")
         body = (getattr(response, "text", "") or "")[:300].replace("\n", " ").strip()
         server = (getattr(response, "headers", {}) or {}).get("server") or "-"
-        return cls(f"HTTP_{status}", f"코레일이 요청을 거부했습니다 [server={server}] {body}")
+        return cls(
+            f"HTTP_{status}",
+            f"코레일이 요청을 거부했습니다 [server={server}] {body}",
+            reason=blocked_reason(response),
+        )
 
 
 # ── 순수 파서 (네트워크 없음, 단위 테스트 대상) ───────────────────────────

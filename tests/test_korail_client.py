@@ -202,17 +202,24 @@ from app.adapters.korail_client import KorailBlocked, KorailClient  # noqa: E402
 class _FakeResponse:
     """`raise_for_status()`만 흉내 내는 최소 응답."""
 
-    def __init__(self, status: int, body: str = "", server: str = "nginx") -> None:
+    def __init__(
+        self, status: int, body: str = "", server: str = "nginx", payload: object = None
+    ) -> None:
         self.status_code = status
         self.text = body
         self.headers = {"server": server}
+        self._payload = payload
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise _requests.HTTPError(f"{self.status_code} Error", response=self)
 
-    def json(self) -> dict:
-        return {"strResult": "SUCC"}
+    def json(self):  # noqa: ANN201
+        if self._payload is None:
+            return {"strResult": "SUCC"}
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
 
 
 def _client_posting(response: _FakeResponse) -> KorailClient:
@@ -232,6 +239,52 @@ def test_403은_사유를_담은_KorailBlocked가_된다():
     assert exc.value.msg_cd == "HTTP_403"
     assert "Access Denied by policy" in exc.value.msg_txt
     assert "waf" in exc.value.msg_txt
+
+
+def test_데이터센터_차단_사유가_화면까지_간다():
+    """★ D-60의 핵심 회귀 테스트.
+
+    코레일은 차단 사유를 JSON으로 친절히 알려주고 있었다. 그런데 우리가 본문을
+    버려서 로그에 `403`만 남았고, 그 때문에 원인을 찾는 데 하루를 썼다.
+    이 문장이 예외에 실려 화면까지 가야 한다.
+    """
+    client = _client_posting(
+        _FakeResponse(
+            403,
+            "…",
+            payload={
+                "code": -8202,
+                "message": "VPN 또는 데이터센터를 통해서는 서비스를 이용할 수 없습니다.",
+            },
+        )
+    )
+
+    with _pytest.raises(KorailBlocked) as exc:
+        client._post("https://x/classes/com.korail.mobile.seatMovie.ScheduleView", {})
+
+    assert "데이터센터" in exc.value.reason
+    assert "-8202" in exc.value.reason
+
+
+@_pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "<html><body>Access Denied</body></html>"},  # WAF 차단 페이지
+        {"message": "가" * 250},  # 너무 길다
+        {"code": -1},  # message 가 없다
+        ValueError("not json"),  # JSON 이 아니다
+        ["not", "a", "dict"],
+    ],
+    ids=["html", "too_long", "no_message", "not_json", "not_dict"],
+)
+def test_읽을_수_없는_본문은_화면에_싣지_않는다(payload):
+    """UI에 HTML 덩어리를 쏟아붓지 않는다. 사유가 없으면 일반 문구로 떨어진다."""
+    client = _client_posting(_FakeResponse(403, "…", payload=payload))
+
+    with _pytest.raises(KorailBlocked) as exc:
+        client._post("https://x/classes/com.korail.mobile.seatMovie.ScheduleView", {})
+
+    assert exc.value.reason is None
 
 
 def test_5xx는_차단이_아니라_일시_장애다():

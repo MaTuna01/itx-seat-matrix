@@ -680,8 +680,33 @@ class TestKorailErrorMapping:
             params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
         )
         assert res.status_code == 502
-        # 거부 사유는 로그로 가고 사용자에게는 노출하지 않는다
+        # 사유를 못 읽었으면 일반 문구로 떨어진다 (server 헤더 같은 건 안 흘린다)
         assert "waf" not in res.json()["detail"]
+
+    def test_차단_사유가_있으면_화면까지_전달된다(self, client):
+        """★ D-60. 서버에 들어가야만 보이는 단서는 없는 것과 같다.
+
+        코레일이 `-8202 VPN 또는 데이터센터…`라고 답하고 있었는데 화면에는
+        500만 떴다. 사유를 읽을 수 있으면 그대로 사용자에게 보여준다.
+        """
+
+        class _Port(_BlockedPort):
+            async def search_trains(self, cred, d, frm, to, at=None):
+                raise KorailBlocked(
+                    "HTTP_403",
+                    "코레일이 요청을 거부했습니다 [server=waf] {...}",
+                    reason="VPN 또는 데이터센터를 통해서는 서비스를 이용할 수 없습니다. (코레일 코드 -8202)",
+                )
+
+        self._override(_Port())
+        res = client.get(
+            "/api/trains/search",
+            params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
+        )
+        assert res.status_code == 502
+        detail = res.json()["detail"]
+        assert "데이터센터" in detail and "-8202" in detail
+        assert "waf" not in detail  # 진단용 부스러기는 여전히 로그에만
 
     def test_정차역_캐시_미스는_404(self, client):
         self._override(_TrainStopsNotCachedPort())
