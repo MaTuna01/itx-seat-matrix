@@ -191,3 +191,125 @@ def test_매진_문구를_분류한다(msg_cd, msg_txt, expected):
 def test_매진은_KorailApiError의_하위형이다():
     """기존 `except KorailApiError` 처리를 깨지 않으면서 따로 잡을 수 있어야 한다."""
     assert issubclass(KorailSoldOut, KorailApiError)
+
+
+# ── 게이트웨이 차단 (D-60) ───────────────────────────────────────────
+import requests as _requests  # noqa: E402
+
+from app.adapters.korail_client import KorailBlocked, KorailClient  # noqa: E402
+
+
+class _FakeResponse:
+    """`raise_for_status()`만 흉내 내는 최소 응답."""
+
+    def __init__(
+        self, status: int, body: str = "", server: str = "nginx", payload: object = None
+    ) -> None:
+        self.status_code = status
+        self.text = body
+        self.headers = {"server": server}
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise _requests.HTTPError(f"{self.status_code} Error", response=self)
+
+    def json(self):  # noqa: ANN201
+        if self._payload is None:
+            return {"strResult": "SUCC"}
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+def _client_posting(response: _FakeResponse) -> KorailClient:
+    client = KorailClient()
+    client._session.post = lambda *a, **kw: response  # type: ignore[method-assign]
+    return client
+
+
+def test_403은_사유를_담은_KorailBlocked가_된다():
+    """★ 2026-09-15 회귀 방지. 그날 로그에는 `403`밖에 남지 않아 원인 판별에
+    실측 호출이 따로 필요했다. 본문과 server 헤더를 예외에 실어 로그로 흘린다."""
+    client = _client_posting(_FakeResponse(403, "Access Denied by policy", server="waf"))
+
+    with _pytest.raises(KorailBlocked) as exc:
+        client._post("https://x/classes/com.korail.mobile.seatMovie.ScheduleView", {})
+
+    assert exc.value.msg_cd == "HTTP_403"
+    assert "Access Denied by policy" in exc.value.msg_txt
+    assert "waf" in exc.value.msg_txt
+
+
+def test_데이터센터_차단_사유가_화면까지_간다():
+    """★ D-60의 핵심 회귀 테스트.
+
+    코레일은 차단 사유를 JSON으로 친절히 알려주고 있었다. 그런데 우리가 본문을
+    버려서 로그에 `403`만 남았고, 그 때문에 원인을 찾는 데 하루를 썼다.
+    이 문장이 예외에 실려 화면까지 가야 한다.
+    """
+    client = _client_posting(
+        _FakeResponse(
+            403,
+            "…",
+            payload={
+                "code": -8202,
+                "message": "VPN 또는 데이터센터를 통해서는 서비스를 이용할 수 없습니다.",
+            },
+        )
+    )
+
+    with _pytest.raises(KorailBlocked) as exc:
+        client._post("https://x/classes/com.korail.mobile.seatMovie.ScheduleView", {})
+
+    assert "데이터센터" in exc.value.reason
+    assert "-8202" in exc.value.reason
+
+
+@_pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "<html><body>Access Denied</body></html>"},  # WAF 차단 페이지
+        {"message": "가" * 250},  # 너무 길다
+        {"code": -1},  # message 가 없다
+        ValueError("not json"),  # JSON 이 아니다
+        ["not", "a", "dict"],
+    ],
+    ids=["html", "too_long", "no_message", "not_json", "not_dict"],
+)
+def test_읽을_수_없는_본문은_화면에_싣지_않는다(payload):
+    """UI에 HTML 덩어리를 쏟아붓지 않는다. 사유가 없으면 일반 문구로 떨어진다."""
+    client = _client_posting(_FakeResponse(403, "…", payload=payload))
+
+    with _pytest.raises(KorailBlocked) as exc:
+        client._post("https://x/classes/com.korail.mobile.seatMovie.ScheduleView", {})
+
+    assert exc.value.reason is None
+
+
+def test_5xx는_차단이_아니라_일시_장애다():
+    """재시도가 의미 있는 쪽이다 — `KorailBlocked`로 삼키면 재시도 기회를 잃는다."""
+    client = _client_posting(_FakeResponse(503, "Service Unavailable"))
+
+    with _pytest.raises(_requests.HTTPError):
+        client._post("https://x/classes/com.korail.mobile.seatMovie.ScheduleView", {})
+
+
+def test_ScheduleView는_쿼리스트링으로_본문없이_나간다():
+    """★ 익명 경로의 핵심 형태 (D-60). 본문에 실으면 다시 403이 난다."""
+    seen: dict = {}
+
+    client = KorailClient()
+
+    def capture(url, **kwargs):  # noqa: ANN001, ANN202
+        seen.update(kwargs)
+        return _FakeResponse(200)
+
+    client._session.post = capture  # type: ignore[method-assign]
+    client._post("https://x/classes/com.korail.mobile.seatMovie.ScheduleView", {"a": "1"}, in_query=True)
+
+    assert seen["data"] is None
+    assert seen["params"]["a"] == "1"
+    # Key는 로그인 산출물이라 익명 경로에 있으면 안 된다
+    assert "Key" not in seen["params"]
+    assert seen["params"]["Device"] == "AD"

@@ -21,6 +21,7 @@ from datetime import date as _date
 from datetime import datetime
 from typing import Awaitable, Callable, Protocol
 
+from app.adapters.korail_client import KorailBlocked
 from app.adapters.korail_port import KorailPort
 from app.domain.matrix import merge_seat_maps
 from app.domain.models import KorailCred, SeatMap, SeatMatrix
@@ -93,12 +94,16 @@ async def _with_retry(
 
     `ValueError`는 재시도하지 않는다 — 어댑터가 "없는 열차/역"처럼 **다시 불러도
     같은 결과인 것**에 쓰는 예외다. 30초씩 3번 기다렸다 같은 답을 받을 이유가 없다.
+
+    `KorailBlocked`도 같다 (→ D-60). 안티봇 차단은 30초 뒤에도 차단이다. 예전에는
+    이 타입이 `RuntimeError`라 **조용히 재시도를 탔다** — 2026-09-15 403 사태 때
+    화면 한 번에 코레일을 두 번씩 두드린 이유가 이것이다.
     """
     last: Exception | None = None
     for attempt in range(1, policy.attempts + 1):
         try:
             return await call()
-        except ValueError:
+        except (ValueError, KorailBlocked):
             raise
         except Exception as exc:  # noqa: BLE001 — 네트워크/코레일 장애 전반
             last = exc

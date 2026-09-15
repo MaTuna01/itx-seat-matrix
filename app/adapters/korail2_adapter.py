@@ -30,7 +30,6 @@ from app.adapters.korail_client import (
     KorailClient,
     KorailSoldOut,
     general_cars,
-    get_client,
     parse_delay_minutes,
     parse_train_summary,
     same_train_no,
@@ -52,11 +51,15 @@ log = logging.getLogger(__name__)
 
 
 class CredentialsRequired(ValueError):
-    """코레일 계정이 연결되지 않았다. `PUT /api/me/korail`로 먼저 등록해야 한다.
+    """코레일 계정 미연결.
 
-    `ValueError`를 상속한다 — `seatmap_fetcher._with_retry`가 이미 "다시 불러도
-    같은 결과인 것"은 `ValueError`로 재시도 제외 처리한다. 계정 미연결은 재시도
-    30초/2초씩 기다려도 저절로 풀리지 않으므로 같은 취급이 맞다.
+    **더 이상 발생하지 않는다** (→ D-60). 조회 3종이 자격증명을 요구하지 않는 것으로
+    확인돼 익명 경로로 전환했다. 타입과 409 매핑은 자격증명 저장 자체를 걷어내는
+    후속 작업(2단계)에서 함께 지운다 — 지금 지우면 변경 반경이 API·DB·프론트로
+    번져 복구가 늦어진다.
+
+    `ValueError`를 상속한다 — `seatmap_fetcher._with_retry`가 "다시 불러도 같은
+    결과인 것"을 `ValueError`로 재시도 제외 처리한다.
     """
 
 
@@ -72,12 +75,15 @@ class TrainStopsNotCached(RuntimeError):
     """
 
 
-def _require(cred: KorailCred | None) -> KorailClient:
-    if cred is None:
-        raise CredentialsRequired(
-            "코레일 계정이 연결되지 않았습니다. 설정에서 계정을 먼저 등록하세요."
-        )
-    return get_client(cred)
+def _new_client() -> KorailClient:
+    """조회 한 건짜리 익명 클라이언트 (→ D-60).
+
+    **매번 새로 만든다.** 익명 쿠키가 `ScheduleView` → `research.*` 순서에 묶여 있어
+    인스턴스를 공유하면 병렬 구간 조회에서 쿠키가 뒤섞인다. 로그인이 없어 공짜다.
+
+    `cred`를 받지 않는다 — 조회 3종은 자격증명을 요구하지 않는다.
+    """
+    return KorailClient()
 
 
 class TrainObservations:
@@ -134,7 +140,7 @@ class Korail2Adapter:
         to: str,
         at: datetime | None = None,
     ) -> list[TrainSummary]:
-        client = _require(cred)
+        client = _new_client()
         raws = await asyncio.to_thread(client.schedule_view, d, frm, to, at)
         for raw in raws:
             self.observations.observe(raw, d)
@@ -183,7 +189,7 @@ class Korail2Adapter:
     async def get_seat_map(
         self, cred: KorailCred | None, train_no: str, d: _date, frm: str, to: str
     ) -> SeatMap:
-        client = _require(cred)
+        client = _new_client()
         seats = await asyncio.to_thread(
             self._seat_map_sync, client, train_no, d, frm, to, self.observations
         )

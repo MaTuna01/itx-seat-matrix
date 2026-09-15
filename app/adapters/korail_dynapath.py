@@ -6,23 +6,26 @@
 고정 커밋: `4b134266fff097ea0fd54e9f760cb128b6c8f878` (korail2 PR #54 "Implement anti-bot
 bypass"의 head 커밋. 공급망 리뷰 완료된 커밋이다)
 
-korail2 **본체는 PyPI 정식 릴리스**(`korail2>=0.4.0`)를 그대로 쓰고, 여기에는 우회에
-필요한 것만 옮긴다. 원본 PR은 `korail2/korail2.py` 한 파일을 +145/-7로 고치는데,
-그 변경은 전부 아래 4가지로 환원된다:
+여기에는 우회에 필요한 것만 옮긴다. 원본 PR은 `korail2/korail2.py` 한 파일을
++145/-7로 고치는데, **우리가 쓰는 것은 그중 하나뿐이다** (→ D-60):
 
-1. `DYNAPATH_PATHS`에 속한 경로에 `x-dynapath-m-token` 헤더 부착
-2. 같은 경로의 요청 본문에 `Sid`(AES-CBC 산출값) 추가
-3. `Version`을 `250601002`로 최신화 (`login()`은 `231231001`을 **하드코딩**하고 있다)
-4. `ScheduleView` 호출을 GET → POST로 변경
+- `x-dynapath-m-token` 헤더 부착 — 우리가 부르는 조회 3종 전부에 붙인다
 
-넷 다 **HTTP 계층에서 표현 가능**하므로 `Korail.login()` / `Korail.search_train()`의
-본문을 복사하지 않고 `requests.Session` 서브클래스 하나로 끝낸다. 업스트림 korail2가
-갱신돼도 메서드 본문이 어긋날 일이 없다 — 우회 코드가 본체와 물리적으로 분리된다.
+원본의 나머지 셋(`Sid` 본문 필드, 로그인 `Version` 덮어쓰기, `ScheduleView`의
+GET→POST 전환)은 **로그인 경로 전용**이라 익명 전환(D-60) 이후 필요 없어졌다.
+`Sid`는 아예 보내지 않는다 — 익명 경로는 요구하지 않는다.
+
+전부 **HTTP 계층에서 표현 가능**하므로 `requests.Session` 서브클래스 하나로 끝낸다.
+업스트림 korail2가 갱신돼도 어긋날 일이 없다 — 우회 코드가 본체와 물리적으로 분리된다.
 
 ## 유지보수 부채 (PLAN 0절에 기록된 리스크)
 
 코레일이 앱을 업데이트하면 토큰 스킴이 바뀌어 우회가 깨질 수 있다. 그때 고칠 곳은
-이 파일 하나다. 깨진 것은 `MACRO ERROR`(`h_msg_cd`)로 드러난다.
+이 파일 하나다.
+
+**증상이 두 가지라는 점에 주의해라.** 앱 로직까지 닿으면 `MACRO ERROR`(`h_msg_cd`)로
+오지만, 게이트웨이에서 먼저 잘리면 **HTTP 403**이다 (2026-09-15 실측 — 그때는 토큰이
+아니라 인증 경로가 막힌 것이었다). 둘 다 `KorailBlocked`로 모인다.
 
 ## 알고리즘 이식 주의
 
@@ -34,19 +37,16 @@ korail2 **본체는 PyPI 정식 릴리스**(`korail2>=0.4.0`)를 그대로 쓰�
 
 from __future__ import annotations
 
-import base64
 import random
 import string
 import time
 from typing import Any
 
 import requests
-from cryptography.hazmat.primitives import padding as _padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 # ── 원본 상수 (dhfhfk/korail2 @ 4b13426) ────────────────────────────────
-# 이 경로들만 토큰을 요구한다. 좌석맵 엔드포인트(research.*)는 여기 없다 —
-# Phase 0 실측대로 인증 세션만으로 호출된다.
+# 토큰을 붙일 경로. **원본과 달리 research.* 도 포함한다** — 원본은 로그인 세션으로
+# 그 둘을 부르지만, 익명 경로에서는 토큰이 곧 통행증이다 (D-60 실측).
 DYNAPATH_PATHS = (
     "/classes/com.korail.mobile.certification.TicketReservation",
     "/classes/com.korail.mobile.nonMember.NonMemTicket",
@@ -54,35 +54,15 @@ DYNAPATH_PATHS = (
     "/classes/com.korail.mobile.seatMovie.ScheduleViewSpecial",
     "/classes/com.korail.mobile.trn.prcFare.do",
     "/classes/com.korail.mobile.login.Login",
+    "/classes/com.korail.mobile.research.TrainResearch",
+    "/classes/com.korail.mobile.research.ResidualSeatsResearch.do",
 )
 
 APP_VERSION = "250601002"
 USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 13; SM-S928N Build/UP1A.231005.007)"
 
-_SID_KEY = b"2485dd54d9deaa36"  # AES-128 키 겸 IV (원본 그대로)
 _DEVICE_ID = "558a4f02041657ea"
 _DEVICE = "AD"
-
-# GET → POST로 바꿔야 하는 경로 (원본 patch의 search_train 변경분)
-_FORCE_POST_PATHS = (
-    "/classes/com.korail.mobile.seatMovie.ScheduleView",
-    "/classes/com.korail.mobile.seatMovie.ScheduleViewSpecial",
-)
-
-
-def _generate_sid(ts_ms: int, *, device: str = _DEVICE) -> str:
-    """`Sid` 본문 필드. AES-128-CBC(key=iv=_SID_KEY) + PKCS7 + base64 + 개행.
-
-    원본은 pycryptodome(`Crypto.Cipher.AES`)을 쓰지만 여기서는 이미 명시적 의존인
-    `cryptography`를 쓴다 — 산출 바이트는 동일하다 (같은 키/IV/패딩).
-    pycryptodome은 korail2의 전이 의존일 뿐이라 직접 기대지 않는다.
-    """
-    plaintext = f"{device}{ts_ms}".encode()
-    padder = _padding.PKCS7(128).padder()
-    padded = padder.update(plaintext) + padder.finalize()
-    encryptor = Cipher(algorithms.AES(_SID_KEY), modes.CBC(_SID_KEY)).encryptor()
-    ciphertext = encryptor.update(padded) + encryptor.finalize()
-    return base64.b64encode(ciphertext).decode() + "\n"
 
 
 class _DynaPathTokenEngine:
@@ -214,19 +194,19 @@ def _matches(url: str, paths: tuple[str, ...]) -> bool:
 
 
 class DynaPathSession(requests.Session):
-    """우회를 적용하는 `requests.Session`.
+    """우회를 적용하는 `requests.Session` — 하는 일은 **토큰 헤더 부착 하나**다.
 
-    `Korail` 인스턴스의 `_session`을 이것으로 갈아끼우면 로그인·열차조회가 통과한다.
-    좌석맵(`research.*`) 호출도 같은 세션을 재사용하면 인증 쿠키가 그대로 실린다.
+    익명 조회 경로(D-60)에서는 이 세션이 인증의 전부다. `ScheduleView` 응답이
+    내려주는 익명 쿠키를 세션이 들고 있다가 `research.*` 두 호출에 실어 보낸다.
 
-    주의: korail2의 `_session`은 **클래스 속성**이라 인스턴스에 대입해 가려야 한다
-    (`korail._session = DynaPathSession()`). 클래스 속성을 갈면 프로세스 전역이 오염된다.
+    **세션 하나가 곧 조회 한 건의 문맥이다.** 쿠키가 순서(ScheduleView → research)에
+    의존하므로 **구간마다 새 세션을 써라** — 하나를 여러 구간이 공유하면 병렬 조회에서
+    쿠키가 뒤섞인다. 로그인이 없어져 세션 생성이 공짜이므로 아낄 이유도 없다.
     """
 
-    def __init__(self, *, app_version: str = APP_VERSION) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self._engine = _DynaPathTokenEngine()
-        self._app_version = app_version
         self.headers.update({"User-Agent": USER_AGENT})
 
     def _dynapath_headers(self, ts_ms: int) -> dict[str, str]:
@@ -237,42 +217,11 @@ class DynaPathSession(requests.Session):
         self, method: str | bytes, url: str | bytes, *args: Any, **kwargs: Any
     ) -> requests.Response:
         url_s = url.decode() if isinstance(url, bytes) else url
-        method_s = (method.decode() if isinstance(method, bytes) else method).upper()
-
-        # (3) Version 최신화. login()이 '231231001'을 하드코딩하고 있어 여기서 덮는다.
-        for field in ("data", "params"):
-            payload = kwargs.get(field)
-            if isinstance(payload, dict) and "Version" in payload:
-                payload["Version"] = self._app_version
 
         if _matches(url_s, DYNAPATH_PATHS):
             ts_ms = int(time.time() * 1000)
-
-            # (1) 토큰 헤더
             headers = dict(kwargs.get("headers") or {})
             headers.update(self._dynapath_headers(ts_ms))
             kwargs["headers"] = headers
 
-            # (2) Sid 본문 필드
-            data = kwargs.get("data")
-            if isinstance(data, dict):
-                data["Sid"] = _generate_sid(ts_ms)
-            elif data is None and method_s == "POST":
-                kwargs["data"] = {"Sid": _generate_sid(ts_ms)}
-
-            # (4) ScheduleView는 POST여야 한다. 원본도 params는 쿼리스트링에 그대로 둔다.
-            if method_s == "GET" and _matches(url_s, _FORCE_POST_PATHS):
-                method_s = "POST"
-
-        return super().request(method_s, url_s, *args, **kwargs)
-
-
-def apply_bypass(korail: Any) -> DynaPathSession:
-    """`korail2.Korail` 인스턴스에 우회를 적용하고 세션을 돌려준다.
-
-    korail2 본체는 건드리지 않는다 — 인스턴스 속성만 덮는다.
-    """
-    session = DynaPathSession()
-    korail._session = session  # 클래스 속성을 인스턴스 속성으로 가림 (위 주의 참고)
-    korail._version = APP_VERSION
-    return session
+        return super().request(method, url_s, *args, **kwargs)

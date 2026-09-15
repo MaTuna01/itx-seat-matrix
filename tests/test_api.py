@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.adapters.korail2_adapter import CredentialsRequired, TrainStopsNotCached
+from app.adapters.korail_client import KorailBlocked
 from app.api.deps import get_korail_port
 from app.api.trains import GPS_NOTE_PARTIAL
 from app.domain.models import KST
@@ -630,6 +631,13 @@ class _TrainStopsNotCachedPort:
         raise AssertionError("get_stops에서 이미 끝났어야 한다")
 
 
+class _BlockedPort(_CredentialsRequiredPort):
+    """코레일 게이트웨이가 우리를 거부하는 상황 (→ D-60)."""
+
+    async def search_trains(self, cred, d, frm, to, at=None):
+        raise KorailBlocked("HTTP_403", "코레일이 요청을 거부했습니다 [server=waf]")
+
+
 class TestKorailErrorMapping:
     """계정 미연결/정차역 캐시 미스가 500이 아니라 의미 있는 상태코드로 나가는지.
 
@@ -658,6 +666,47 @@ class TestKorailErrorMapping:
             params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
         )
         assert res.status_code == 409
+
+    def test_코레일_차단은_502다_500도_403도_아니다(self, client):
+        """★ D-60 회귀 방지.
+
+        500은 "우리 버그"라는 뜻이라 틀리고, 403은 "요청한 **사용자**에게 권한이
+        없다"는 뜻이라 틀리다 — 이 앱은 403을 이미 관리자 전용 기능(D-24)에 쓰고
+        있어서, 코레일 차단까지 403으로 내리면 화면이 둘을 구분할 수 없다.
+        """
+        self._override(_BlockedPort())
+        res = client.get(
+            "/api/trains/search",
+            params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
+        )
+        assert res.status_code == 502
+        # 사유를 못 읽었으면 일반 문구로 떨어진다 (server 헤더 같은 건 안 흘린다)
+        assert "waf" not in res.json()["detail"]
+
+    def test_차단_사유가_있으면_화면까지_전달된다(self, client):
+        """★ D-60. 서버에 들어가야만 보이는 단서는 없는 것과 같다.
+
+        코레일이 `-8202 VPN 또는 데이터센터…`라고 답하고 있었는데 화면에는
+        500만 떴다. 사유를 읽을 수 있으면 그대로 사용자에게 보여준다.
+        """
+
+        class _Port(_BlockedPort):
+            async def search_trains(self, cred, d, frm, to, at=None):
+                raise KorailBlocked(
+                    "HTTP_403",
+                    "코레일이 요청을 거부했습니다 [server=waf] {...}",
+                    reason="VPN 또는 데이터센터를 통해서는 서비스를 이용할 수 없습니다. (코레일 코드 -8202)",
+                )
+
+        self._override(_Port())
+        res = client.get(
+            "/api/trains/search",
+            params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
+        )
+        assert res.status_code == 502
+        detail = res.json()["detail"]
+        assert "데이터센터" in detail and "-8202" in detail
+        assert "waf" not in detail  # 진단용 부스러기는 여전히 로그에만
 
     def test_정차역_캐시_미스는_404(self, client):
         self._override(_TrainStopsNotCachedPort())
