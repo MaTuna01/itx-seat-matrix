@@ -1,27 +1,39 @@
 """코레일 모바일 API 저수준 클라이언트 (**동기**) — Phase 2 항목 B/E/F.
 
-`korail2`는 로그인만 시킨다 (비밀번호 AES 암호화 + `code.do` 왕복을 대신해 준다).
-데이터 조회는 **원시 POST**로 직접 한다 — 이유:
+**로그인하지 않는다** (→ D-60). 우리가 쓰는 조회 3종은 자격증명을 요구하지 않는다:
 
-- 좌석맵 엔드포인트(`research.*`)가 korail2에 **아예 없다** (Phase 0 감사)
-- `ScheduleView` 응답의 **운행 순번**(`h_dpt_stn_run_ordr`/`h_arv_stn_run_ordr`)이
-  좌석맵 페이로드에 반드시 필요한데 korail2의 `Train` 객체는 이를 버린다
+    1. ScheduleView          — 열차 목록. 여기서 **익명 쿠키**가 내려온다
+    2. TrainResearch         — 호차별 잔여석
+    3. ResidualSeatsResearch — ★ 좌석별 판매 여부
+
+**순서가 곧 인증이다.** 1번이 발급한 쿠키를 2·3번이 물려받는다. 2번을 먼저 부르면
+`P058`로 실패한다. `find_train`이 항상 1번을 먼저 부르므로 이 순서는 자연히 지켜진다.
+
+데이터 조회는 **원시 POST**다 — 좌석맵 엔드포인트(`research.*`)가 korail2에 아예 없고
+(Phase 0 감사), `ScheduleView` 응답의 **운행 순번**(`h_dpt_stn_run_ordr`/
+`h_arv_stn_run_ordr`)이 좌석맵 페이로드에 필요한데 korail2의 `Train`은 이를 버린다.
+
+`ScheduleView`만 파라미터를 **쿼리스트링**에 싣고 본문을 비운다 — 익명 경로의 실측
+형태다(D-60). `research.*` 둘은 폼 본문이다.
 
 이 모듈은 동기다. **async에서 직접 부르지 마라** — `korail2_adapter`가
 `asyncio.to_thread`로 감싼다 (CLAUDE.md 절대규칙 3).
 
-세션은 프로세스 내 캐시이고 **만료를 감지했을 때만** 재로그인한다.
+**클라이언트 하나 = 세션 하나 = 조회 한 건의 문맥이다.** 프로세스 캐시를 두지 않는다 —
+익명 쿠키가 순서에 의존해서, 공유하면 병렬 조회(Semaphore 3)에서 구간끼리 쿠키가
+뒤섞인다. 로그인이 없어져 생성이 공짜이므로 아낄 이유도 없다.
 """
 
 from __future__ import annotations
 
-import threading
 from datetime import date as _date
 from datetime import datetime
 from typing import Any
 
-from app.adapters.korail_dynapath import DynaPathSession, apply_bypass
-from app.domain.models import KST, KorailCred, SeatState, TrainSummary
+import requests
+
+from app.adapters.korail_dynapath import APP_VERSION, DynaPathSession
+from app.domain.models import KST, SeatState, TrainSummary
 
 HOST = "https://smart.letskorail.com:443"
 MOBILE = f"{HOST}/classes/com.korail.mobile"
@@ -65,7 +77,11 @@ class KorailApiError(RuntimeError):
 
 
 class KorailSessionExpired(KorailApiError):
-    """세션 만료. 재로그인 후 1회 재시도한다."""
+    """`P058` — 익명 쿠키가 없거나 만료됐다 (→ D-60).
+
+    로그인이 없어진 뒤로는 "재로그인"이 아니라 **`ScheduleView`부터 다시**가 복구
+    절차다. `find_train`이 구간마다 그것을 먼저 부르므로 다음 시도에서 저절로 낫는다.
+    """
 
 
 class KorailSoldOut(KorailApiError):
@@ -84,11 +100,29 @@ def looks_sold_out(msg_cd: str, msg_txt: str) -> bool:
 
 
 class KorailBlocked(KorailApiError):
-    """`MACRO ERROR` — 안티봇에 막혔다.
+    """안티봇에 막혔다. **두 얼굴이 있다** (→ D-60).
 
-    DynaPath 우회가 깨졌다는 신호다. 고칠 곳은 `korail_dynapath.py` 하나다 (D-22).
-    재시도해도 소용없으므로 재시도 대상이 아니다.
+    - `MACRO ERROR`(`h_msg_cd`) — 앱 로직까지 닿은 뒤 거부당한 경우
+    - **HTTP 4xx** — 게이트웨이에서 먼저 잘린 경우. `msg_cd`가 `HTTP_403` 꼴이다
+      (5xx는 일시 장애로 보고 여기 담지 않는다 — 재시도가 의미 있다)
+
+    후자를 `ValueError`로 흘리면 조용히 매진으로 둔갑하므로 반드시 이 타입으로 모은다.
+    재시도해도 소용없다 — `seatmap_fetcher`가 재시도 제외 목록에 넣는다.
+    고칠 곳은 보통 `korail_dynapath.py` 하나다 (D-22).
     """
+
+    @classmethod
+    def from_http(cls, exc: requests.HTTPError) -> KorailBlocked:
+        """`raise_for_status()`의 예외 → 원인 추적이 가능한 형태로.
+
+        응답 본문을 버리지 않는다 — 2026-09-15에는 로그에 `403`밖에 남지 않아
+        원인(토큰이냐 경로냐)을 가리는 데 실측 호출이 따로 필요했다.
+        """
+        response = exc.response
+        status = getattr(response, "status_code", "?")
+        body = (getattr(response, "text", "") or "")[:300].replace("\n", " ").strip()
+        server = (getattr(response, "headers", {}) or {}).get("server") or "-"
+        return cls(f"HTTP_{status}", f"코레일이 요청을 거부했습니다 [server={server}] {body}")
 
 
 # ── 순수 파서 (네트워크 없음, 단위 테스트 대상) ───────────────────────────
@@ -173,68 +207,52 @@ def general_cars(car_infos: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # ── 클라이언트 (동기) ─────────────────────────────────────────────────────
 class KorailClient:
-    """로그인 세션 1개를 감싼 저수준 클라이언트.
+    """익명 세션 1개를 감싼 저수준 클라이언트 (→ D-60).
 
-    스레드 안전: `asyncio.to_thread`로 여러 스레드에서 동시에 불릴 수 있으므로
-    로그인 구간을 락으로 감싼다. 조회 자체는 `requests.Session`이 스레드 세이프하다.
+    **재사용하지 마라 — 조회 한 건마다 새로 만들어라.** 익명 쿠키가 호출 순서에
+    의존하므로 인스턴스를 공유하면 병렬 구간 조회에서 쿠키가 뒤섞인다. 로그인이
+    없어져 생성 비용이 사실상 0이다 (객체 하나 + `requests.Session` 하나).
     """
 
-    def __init__(self, cred: KorailCred) -> None:
-        self._cred = cred
-        self._lock = threading.Lock()
-        self._korail: Any = None
-        self._session: DynaPathSession | None = None
-
-    # -- 세션 --------------------------------------------------------------
-    def _ensure_login(self) -> DynaPathSession:
-        """이미 로그인돼 있으면 그대로 쓴다. **만료 시에만** 재로그인 (D-22)."""
-        with self._lock:
-            if self._session is not None and getattr(self._korail, "logined", False):
-                return self._session
-            return self._login_locked()
-
-    def _login_locked(self) -> DynaPathSession:
-        from korail2 import Korail  # noqa: PLC0415 — korail2 경로에서만 import
-
-        korail = Korail(self._cred.korail_id, self._cred.korail_pw, auto_login=False)
-        session = apply_bypass(korail)  # DynaPath 우회 적용 (D-22)
-        if not korail.login():
-            raise KorailApiError("LOGIN_FAILED", "코레일 로그인에 실패했습니다")
-        self._korail, self._session = korail, session
-        return session
-
-    def _relogin(self) -> DynaPathSession:
-        with self._lock:
-            return self._login_locked()
-
-    @property
-    def _key(self) -> str:
-        return getattr(self._korail, "_key", "korail1234567890")
+    def __init__(self) -> None:
+        self._session = DynaPathSession()
 
     # -- 원시 호출 ---------------------------------------------------------
     def _base(self) -> dict[str, Any]:
-        from app.adapters.korail_dynapath import APP_VERSION  # noqa: PLC0415
+        """모든 요청에 공통으로 붙는 것. `Key`는 로그인 산출물이라 이제 없다."""
+        return {"Device": DEVICE, "Version": APP_VERSION}
 
-        return {"Device": DEVICE, "Version": APP_VERSION, "Key": self._key}
-
-    def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST 1회 + **세션 만료 시에만** 재로그인 후 1회 재시도.
-
-        네트워크 장애 재시도(30초×3)는 여기가 아니라 `seatmap_fetcher`의
-        `RetryPolicy`가 담당한다 — 계층을 겹치면 재시도가 곱해진다.
-        """
-        session = self._ensure_login()
-        try:
-            return self._post_once(session, url, payload)
-        except KorailSessionExpired:
-            session = self._relogin()
-            return self._post_once(session, url, payload)
-
-    def _post_once(
-        self, session: DynaPathSession, url: str, payload: dict[str, Any]
+    def _post(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        in_query: bool = False,
     ) -> dict[str, Any]:
-        response = session.post(url, data=self._base() | payload, timeout=20)
-        response.raise_for_status()
+        """POST 1회. **여기서는 재시도하지 않는다.**
+
+        네트워크 장애 재시도(30초×3)는 `seatmap_fetcher`의 `RetryPolicy`가 담당한다 —
+        계층을 겹치면 재시도가 곱해진다.
+
+        `in_query=True`면 파라미터를 쿼리스트링에 싣고 본문을 비운다 (`ScheduleView`의
+        익명 형태). 기본은 폼 본문이다 (`research.*`).
+        """
+        fields = self._base() | payload
+        try:
+            response = self._session.post(
+                url,
+                params=fields if in_query else None,
+                data=None if in_query else fields,
+                timeout=20,
+            )
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", 0)
+            # 5xx는 코레일 쪽 일시 장애다 — 그대로 올려보내 RetryPolicy가 다시 걸게 둔다.
+            # 4xx는 다시 불러도 같다 (차단·형식 오류). 본문을 실어 원인을 남긴다.
+            if 400 <= status < 500:
+                raise KorailBlocked.from_http(exc) from exc
+            raise
         body = response.json()
 
         if str(body.get("strResult")) != "FAIL":
@@ -263,17 +281,20 @@ class KorailClient:
         payload = {
             "radJobId": "1",  # 직통
             "selGoTrain": "109",  # 전체 열차종
+            "txtCardPsgCnt": "0",
             "txtGdNo": "",
             "txtGoAbrdDt": d.strftime("%Y%m%d"),
             "txtGoEnd": to,
             "txtGoHour": (at or datetime.combine(d, datetime.min.time())).strftime("%H%M%S"),
             "txtGoStart": frm,
+            "txtJobDv": "",
             "txtMenuId": "11",
             "txtPsgFlg_1": "1",  # 어른 1명
             "txtPsgFlg_2": "0",
             "txtPsgFlg_3": "0",
             "txtPsgFlg_4": "0",
             "txtPsgFlg_5": "0",
+            "txtPsgFlg_8": "0",
             "txtSeatAttCd_2": "000",
             "txtSeatAttCd_3": "000",
             "txtSeatAttCd_4": "015",
@@ -284,7 +305,9 @@ class KorailClient:
             "srtCheckYn": "N",
         }
         try:
-            body = self._post(URL_SCHEDULE, payload)
+            # ★ 익명 경로는 파라미터를 쿼리스트링에 싣고 본문을 비운다 (D-60 실측).
+            #   이 요청의 응답이 내려주는 쿠키로 이어지는 research.* 두 호출이 통과한다.
+            body = self._post(URL_SCHEDULE, payload, in_query=True)
         except KorailSoldOut:
             # 매진도 '해당 없음'과 같다 — 이 구간에 팔 열차가 없다는 답이다 (D-36).
             # 호출부(find_train)가 None을 받고 전 좌석 판매로 처리한다.
@@ -341,24 +364,12 @@ class KorailClient:
         return parse_seat_states(car_no, seat_infos)
 
 
-# ── 프로세스 내 세션 캐시 ─────────────────────────────────────────────────
-# 매 조회마다 로그인하면 호출 예절 위반이자 세션 충돌 위험이다 (D-14 문제 1).
-# 자격증명이 바뀌면 새 클라이언트를 만든다.
-_clients: dict[tuple[str, str], KorailClient] = {}
-_clients_lock = threading.Lock()
-
-
-def get_client(cred: KorailCred) -> KorailClient:
-    key = (cred.korail_id, cred.korail_pw)
-    with _clients_lock:
-        client = _clients.get(key)
-        if client is None:
-            client = KorailClient(cred)
-            _clients[key] = client
-        return client
-
-
-def reset_clients() -> None:
-    """테스트용. 프로세스 캐시를 비운다."""
-    with _clients_lock:
-        _clients.clear()
+# ── 세션 캐시는 두지 않는다 (→ D-60) ──────────────────────────────────────
+# 예전에는 자격증명별로 클라이언트를 캐시했다. 매 조회마다 로그인하면 호출 예절
+# 위반이자 세션 충돌 위험이었기 때문이다 (D-14 문제 1).
+#
+# 익명 전환으로 그 전제가 사라졌다. 로그인 왕복이 없으니 아낄 것이 없고, 오히려
+# **캐시가 위험해졌다** — 익명 쿠키는 `ScheduleView` → `research.*` 순서에 묶여 있어서
+# 인스턴스를 공유하면 병렬 구간 조회(Semaphore 3)에서 구간끼리 쿠키를 덮어쓴다.
+#
+# 그래서 호출부가 `KorailClient()`를 조회 한 건마다 직접 만든다.

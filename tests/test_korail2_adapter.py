@@ -16,7 +16,6 @@ from datetime import datetime
 import pytest
 
 from app.adapters.korail2_adapter import (
-    CredentialsRequired,
     Korail2Adapter,
     Korail2DelayAdapter,
     TrainStopsNotCached,
@@ -55,6 +54,10 @@ class FakeClient:
         self.schedule_calls += 1
         return self._train
 
+    def schedule_view(self, d, frm, to, at=None):  # noqa: ANN001, ANN201
+        self.schedule_calls += 1
+        return [self._train] if self._train else []
+
     def car_list(self, train):  # noqa: ANN001, ANN201
         self.car_list_calls += 1
         return self._cars
@@ -73,7 +76,7 @@ def adapter_with(monkeypatch):
     def _make(client: FakeClient) -> Korail2Adapter:
         import app.adapters.korail2_adapter as mod
 
-        monkeypatch.setattr(mod, "get_client", lambda cred: client)
+        monkeypatch.setattr(mod, "_new_client", lambda: client)
         return Korail2Adapter(TrainObservations())
 
     return _make
@@ -230,12 +233,25 @@ async def test_list_stations_returns_usable_from_table(tmp_path, monkeypatch) ->
     assert [s.name for s in result] == ["수원"]
 
 
-async def test_missing_credentials_raise_clear_error() -> None:
-    with pytest.raises(CredentialsRequired):
-        await Korail2Adapter().get_seat_map(None, "1472", RIDE_DATE, "천안", "수원")
+async def test_자격증명_없이도_조회된다(adapter_with) -> None:
+    """★ D-60. 조회 3종은 자격증명을 요구하지 않는다 — `cred=None`으로 끝까지 간다.
 
-    with pytest.raises(CredentialsRequired):
-        await Korail2Adapter().search_trains(None, RIDE_DATE, "천안", "수원")
+    예전에는 여기서 `CredentialsRequired`가 났다 (D-14/D-22의 "로그인 필수" 전제).
+    2026-09-15 코레일이 **인증된** `ScheduleView`를 403으로 막으면서 그 전제가 뒤집혔고,
+    로그인 없는 익명 경로가 멀쩡한 것이 실측으로 확인됐다.
+
+    이 테스트가 깨지면 자격증명 요구가 되살아난 것이다 — 그 순간 계정이 없는 사용자는
+    화면이 통째로 막힌다.
+    """
+    result = await adapter_with(FakeClient([car(1)])).get_seat_map(
+        None, "1472", RIDE_DATE, "천안", "수원"
+    )
+    assert [s.car for s in result.seats] == [1]
+
+    summaries = await adapter_with(FakeClient([car(1)])).search_trains(
+        None, RIDE_DATE, "천안", "수원"
+    )
+    assert [s.train_no for s in summaries] == ["1472"]
 
 
 # ── 매진을 데이터로 흡수한다 (D-36) ──────────────────────────────────
