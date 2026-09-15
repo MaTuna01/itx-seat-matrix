@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.adapters.korail2_adapter import CredentialsRequired
-from app.adapters.korail_client import KorailApiError
+from app.adapters.korail_client import KorailApiError, KorailBlocked
 from app.adapters.seatmap_fetcher import (
     NO_RETRY,
     RetryPolicy,
@@ -294,6 +294,21 @@ async def test_credentials_required_is_not_retried() -> None:
     port = FlakyPort(99, CredentialsRequired("코레일 계정이 연결되지 않았습니다."))
     slept: list[float] = []
     with pytest.raises(CredentialsRequired):
+        await _run(port, RetryPolicy(attempts=3, delay_seconds=30.0), slept)
+    assert port.attempts == 1
+    assert slept == []
+
+
+async def test_안티봇_차단은_재시도하지_않는다() -> None:
+    """★ D-60. 30초 뒤에도 차단은 차단이다.
+
+    `KorailBlocked`는 `RuntimeError` 계열이라 예전에는 **조용히 재시도를 탔다** —
+    2026-09-15 403 사태 때 화면 한 번에 코레일을 두 번씩 두드린 이유가 이것이다.
+    차단 상태에서 재시도는 상황을 악화시킬 뿐이다 (CLAUDE.md 10).
+    """
+    port = FlakyPort(99, KorailBlocked("HTTP_403", "코레일이 요청을 거부했습니다"))
+    slept: list[float] = []
+    with pytest.raises(KorailBlocked):
         await _run(port, RetryPolicy(attempts=3, delay_seconds=30.0), slept)
     assert port.attempts == 1
     assert slept == []

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.adapters.korail2_adapter import CredentialsRequired, TrainStopsNotCached
+from app.adapters.korail_client import KorailBlocked
 from app.api.deps import get_korail_port
 from app.api.trains import GPS_NOTE_PARTIAL
 from app.domain.models import KST
@@ -630,6 +631,13 @@ class _TrainStopsNotCachedPort:
         raise AssertionError("get_stops에서 이미 끝났어야 한다")
 
 
+class _BlockedPort(_CredentialsRequiredPort):
+    """코레일 게이트웨이가 우리를 거부하는 상황 (→ D-60)."""
+
+    async def search_trains(self, cred, d, frm, to, at=None):
+        raise KorailBlocked("HTTP_403", "코레일이 요청을 거부했습니다 [server=waf]")
+
+
 class TestKorailErrorMapping:
     """계정 미연결/정차역 캐시 미스가 500이 아니라 의미 있는 상태코드로 나가는지.
 
@@ -658,6 +666,22 @@ class TestKorailErrorMapping:
             params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
         )
         assert res.status_code == 409
+
+    def test_코레일_차단은_502다_500도_403도_아니다(self, client):
+        """★ D-60 회귀 방지.
+
+        500은 "우리 버그"라는 뜻이라 틀리고, 403은 "요청한 **사용자**에게 권한이
+        없다"는 뜻이라 틀리다 — 이 앱은 403을 이미 관리자 전용 기능(D-24)에 쓰고
+        있어서, 코레일 차단까지 403으로 내리면 화면이 둘을 구분할 수 없다.
+        """
+        self._override(_BlockedPort())
+        res = client.get(
+            "/api/trains/search",
+            params={"date": RIDE_DATE, "from": "천안", "to": "서울"},
+        )
+        assert res.status_code == 502
+        # 거부 사유는 로그로 가고 사용자에게는 노출하지 않는다
+        assert "waf" not in res.json()["detail"]
 
     def test_정차역_캐시_미스는_404(self, client):
         self._override(_TrainStopsNotCachedPort())

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import date as _date
 from datetime import datetime, time as _time
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 from app.adapters.delay_zero import ZeroDelayAdapter
 from app.adapters.korail2_adapter import CredentialsRequired
+from app.adapters.korail_client import KorailBlocked
 from app.adapters.korail_port import KorailPort
 from app.adapters.seatmap_fetcher import SCREEN_RETRY, fetch_matrix
 from app.api.deps import get_delay_port, get_korail_cred, get_korail_port, now_kst
@@ -44,7 +46,26 @@ from app.storage import seat_snapshot
 from app.storage.matrix_cache import SqliteSeatMapCache
 from app.storage.seat_snapshot import SqliteSeatSnapshotStore
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/trains", tags=["trains"])
+
+
+def _blocked(exc: KorailBlocked) -> HTTPException:
+    """코레일이 우리를 거부했다 → **502** (→ D-60).
+
+    500이 아니다 — 우리 버그가 아니라 상위 서버가 준 오류다. 403도 아니다 —
+    그건 "요청한 **사용자**에게 권한이 없다"는 뜻이고, 이 앱에서는 이미 관리자
+    전용 기능(D-24)이 쓰고 있어 화면이 두 상황을 구분하지 못하게 된다.
+
+    거부 사유를 여기서 **로그에 남긴다.** 2026-09-15에는 `403`이라는 사실만 남고
+    본문이 버려져서, 원인(토큰이냐 인증 경로냐)을 가리는 데 실측 호출이 따로 필요했다.
+    """
+    log.warning("코레일 조회 거부 [%s] %s", exc.msg_cd, exc.msg_txt)
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="코레일이 조회 요청을 거부했습니다. 잠시 후 다시 시도해 주세요.",
+    )
 
 
 class SeatRowOut(BaseModel):
@@ -163,6 +184,8 @@ async def search_trains(
             raise HTTPException(status_code=422, detail='time 형식은 "HH:MM"이다') from exc
     try:
         return await port.search_trains(cred, date, from_station, to_station, at)
+    except KorailBlocked as exc:
+        raise _blocked(exc) from exc
     except CredentialsRequired as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -259,6 +282,8 @@ async def get_matrix(
             recorder=SqliteSeatSnapshotStore(conn),
             retry=SCREEN_RETRY,
         )
+    except KorailBlocked as exc:
+        raise _blocked(exc) from exc
     except CredentialsRequired as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
